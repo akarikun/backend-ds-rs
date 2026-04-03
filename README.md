@@ -1,5 +1,36 @@
 ### 一个简单的分布式后台服务
 
+### 玩家数据表
+
+- `player_profiles`: 玩家基础档案，保存昵称、等级、经验、头像、创建/更新时间。
+- `player_wallets`: 玩家货币账户，保存金币、钻石、体力。
+- `player_items`: 玩家背包道具，按 `userid + item_id` 唯一约束聚合数量。
+- `player_mails`: 玩家邮件，支持附件 JSON、已读/未读状态、发信时间。
+
+### Addon DB 用法
+
+```js
+query("get_player", async (db, data) => {
+  let rows = await db.query(
+    "select * from player_profiles where userid = ?",
+    [data.userid || ""]
+  );
+  return rows[0] || null;
+});
+
+query("create_player", async (db, data) => {
+  let rows = await db.query(
+    `insert into player_profiles (userid, nickname)
+     values (?, ?)
+     on conflict (userid)
+     do update set nickname = excluded.nickname, updated_at = now()
+     returning *`,
+    [data.userid || "", data.nickname || "player"]
+  );
+  return rows[0] || null;
+});
+```
+
 ```
 # Master
 "node_id": "master-1",

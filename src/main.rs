@@ -19,9 +19,9 @@ async fn main() {
     addons_runtime::init_addons();
     distributed::start_worker_client();
 
-    let router = Router::new().push(router::config_router()).push(
-        Router::with_path("{**path}").get(static_embed::<Assets>().fallback("index.html")),
-    );
+    let router = Router::new()
+        .push(router::config_router())
+        .push(Router::with_path("{**path}").get(static_embed::<Assets>().fallback("index.html")));
     let host = config.host.clone();
     dbg!(&config);
     println!("http://{}", host);

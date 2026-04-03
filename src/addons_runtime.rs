@@ -190,6 +190,7 @@ fn js_db_query(
     Ok(json_to_js_value(value, context))
 }
 
+
 fn js_arg_to_string(value: Option<&JsValue>, context: &mut Context) -> String {
     value
         .and_then(|value| value.to_string(context).ok())
@@ -198,7 +199,9 @@ fn js_arg_to_string(value: Option<&JsValue>, context: &mut Context) -> String {
 }
 
 fn js_arg_to_json(value: Option<&JsValue>, context: &mut Context) -> Option<Value> {
-    value.and_then(|value| value.to_json(context).ok()).flatten()
+    value
+        .and_then(|value| value.to_json(context).ok())
+        .flatten()
 }
 
 fn js_console_log(
@@ -233,6 +236,7 @@ fn json_to_js_value(value: Value, context: &mut Context) -> JsValue {
     let Ok(source) = serde_json::to_string(&value) else {
         return JsValue::null();
     };
+    let source = format!("({source})");
 
     context
         .eval(Source::from_bytes(source.as_str()))

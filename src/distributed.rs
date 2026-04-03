@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use socketioxide::SocketIo;
 use socketioxide::extract::{Data, SocketRef};
 use socketioxide::socket::DisconnectReason;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, sleep};
 
@@ -193,7 +193,10 @@ async fn connect_master_loop() {
             }
             Err(err) => {
                 dbg!("connect_master_failed", err.to_string());
-                sleep(Duration::from_secs(config.distributed.heartbeat_interval_secs.max(1))).await;
+                sleep(Duration::from_secs(
+                    config.distributed.heartbeat_interval_secs.max(1),
+                ))
+                .await;
             }
         }
     }
@@ -252,7 +255,6 @@ async fn connect_master_once() -> Result<Client, rust_socketio::Error> {
         .connect()
         .await
 }
-
 
 async fn run_worker_heartbeat(client: Client) {
     let interval_secs = config.distributed.heartbeat_interval_secs.max(1);
@@ -325,11 +327,13 @@ pub fn dashboard_snapshot() -> Value {
             "last_heartbeat": now_ts(),
         });
 
-        if let Some(workers) = dashboard.get_mut("workers").and_then(|value| value.as_array_mut()) {
-            if !workers
-                .iter()
-                .any(|worker| worker.get("node_id").and_then(|value| value.as_str()) == Some(&self_node_id))
-            {
+        if let Some(workers) = dashboard
+            .get_mut("workers")
+            .and_then(|value| value.as_array_mut())
+        {
+            if !workers.iter().any(|worker| {
+                worker.get("node_id").and_then(|value| value.as_str()) == Some(&self_node_id)
+            }) {
                 workers.push(self_node);
             }
             dashboard["worker_count"] = json!(workers.len());
@@ -408,7 +412,9 @@ fn release_worker_load(worker_id: &str, task_cost: u64) {
 
 fn should_master_run_task_locally(task: &Value) -> bool {
     matches!(
-        task.get("type").and_then(|value| value.as_str()).unwrap_or(""),
+        task.get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or(""),
         "create_player"
     )
 }
@@ -651,7 +657,12 @@ pub async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value
     match SERVER_NODES.entry(node_id.clone()) {
         Entry::Occupied(mut entry) => {
             let old_socket = entry.get().socket.clone();
-            dbg!("replace_old_server_node", &node_id, old_socket.id, socket.id);
+            dbg!(
+                "replace_old_server_node",
+                &node_id,
+                old_socket.id,
+                socket.id
+            );
             _ = old_socket.disconnect();
             entry.insert(node);
         }
@@ -673,13 +684,15 @@ pub async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value
     );
 
     socket.on("server_msg", handle_server_message);
-    socket.on_disconnect(move |_socket: SocketRef, _reason: DisconnectReason| async move {
-        let should_remove = SERVER_NODES
-            .get(&node_id)
-            .map(|node| node.socket.id == socket_id)
-            .unwrap_or(false);
-        if should_remove {
-            SERVER_NODES.remove(&node_id);
-        }
-    });
+    socket.on_disconnect(
+        move |_socket: SocketRef, _reason: DisconnectReason| async move {
+            let should_remove = SERVER_NODES
+                .get(&node_id)
+                .map(|node| node.socket.id == socket_id)
+                .unwrap_or(false);
+            if should_remove {
+                SERVER_NODES.remove(&node_id);
+            }
+        },
+    );
 }
