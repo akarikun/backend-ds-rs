@@ -11,6 +11,7 @@ mod pg;
 #[async_trait]
 trait DbDriver: Send + Sync {
     async fn read(&self, target: &str, query: Value) -> Result<Vec<Value>, String>;
+    async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Value>, String>;
     async fn create_player_info(&self, userid: &str, nickname: &str) -> Result<Value, String>;
 }
 
@@ -35,6 +36,13 @@ pub async fn db_read(target: &str, query: Value) -> Result<Vec<Value>, String> {
         .get()
         .ok_or_else(|| "db not initialized".to_string())?;
     conn.read(target, query).await
+}
+
+pub async fn db_query(sql: &str, params: Vec<Value>) -> Result<Vec<Value>, String> {
+    let conn = DB_CONN
+        .get()
+        .ok_or_else(|| "db not initialized".to_string())?;
+    conn.query(sql, params).await
 }
 
 pub async fn create_player_info(userid: &str, nickname: &str) -> Result<Value, String> {

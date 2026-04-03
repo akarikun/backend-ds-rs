@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Addon JS Test</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #0f172a;
+      color: #e5e7eb;
+      font-family: Arial, sans-serif;
+    }
+    input, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #111827;
+      color: #e5e7eb;
+    }
+    button {
+      cursor: pointer;
+      background: #2563eb;
+      border: none;
+      font-weight: 700;
+    }
+    pre {
+      padding: 12px;
+      background: #111827;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <h2>Addon JS Test</h2>
+
+  <label>UserID</label>
+  <input id="userid" value="test_userid">
+
+  <label>CMD</label>
+  <input id="cmd" value="get_player">
+
+  <label>Data JSON</label>
+  <textarea id="data" rows="6">{"userid":"test_userid"}</textarea>
+
+  <button onclick="connectWs()">连接 /ws</button>
+  <button onclick="sendMsg()">发送消息</button>
+
+  <h3>状态</h3>
+  <pre id="status">disconnected</pre>
+
+  <h3>返回</h3>
+  <pre id="result">{}</pre>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.1.2/dist.umd/msgpack.min.js"></script>
+  <script>
+    let socket = null;
+    const aesPassphrase = "V0.0.1-A265";
+
+    function setStatus(text) {
+      document.getElementById("status").textContent = text;
+    }
+
+    function setResult(data) {
+      document.getElementById("result").textContent = JSON.stringify(data, null, 2);
+    }
+
+    function decodeMsgpackPayload(payload) {
+      if (payload instanceof ArrayBuffer) {
+        return MessagePack.decode(new Uint8Array(payload));
+      }
+      if (payload instanceof Uint8Array) {
+        return MessagePack.decode(payload);
+      }
+      return payload;
+    }
+
+    function connectWs() {
+      const userid = document.getElementById("userid").value.trim();
+      const validuser = CryptoJS.AES.encrypt(userid, aesPassphrase).toString();
+
+      if (socket) {
+        socket.disconnect();
+      }
+
+      socket = io("/ws", {
+        path: "/socket.io",
+        auth: { userid, validuser }
+      });
+
+      socket.on("connect", () => setStatus(`connected: ${socket.id}`));
+      socket.on("disconnect", (reason) => setStatus(`disconnected: ${reason}`));
+      socket.on("connect_error", (err) => setStatus(`connect_error: ${err.message}`));
+
+      const cmd = document.getElementById("cmd").value.trim();
+      socket.on(`${cmd}_result`, (payload) => {
+        setResult(decodeMsgpackPayload(payload));
+      });
+    }
+
+    function sendMsg() {
+      if (!socket || !socket.connected) {
+        setStatus("请先连接 /ws");
+        return;
+      }
+
+      const cmd = document.getElementById("cmd").value.trim();
+      const dataText = document.getElementById("data").value.trim();
+      let data = {};
+
+      try {
+        data = dataText ? JSON.parse(dataText) : {};
+      } catch (err) {
+        setStatus(`data json parse error: ${err.message}`);
+        return;
+      }
+
+      socket.emit("message", MessagePack.encode({ cmd, data }));
+      setStatus(`sent: ${cmd}`);
+    }
+  </script>
+</body>
+</html>

@@ -44,6 +44,10 @@ impl DbDriver for MongoDb {
         Ok(rows)
     }
 
+    async fn query(&self, _sql: &str, _params: Vec<Value>) -> Result<Vec<Value>, String> {
+        Err("db.query only supports postgresql".to_string())
+    }
+
     async fn create_player_info(&self, userid: &str, nickname: &str) -> Result<Value, String> {
         let doc = doc! {
             "userid": userid,

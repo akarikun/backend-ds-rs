@@ -1,4 +1,5 @@
 use salvo::{prelude::*, serve_static::static_embed};
+mod addons_runtime;
 mod commons;
 mod distributed;
 mod router;
@@ -15,6 +16,7 @@ async fn main() {
     if let Err(err) = init_db().await {
         panic!("init db failed: {err}");
     }
+    addons_runtime::init_addons();
     distributed::start_worker_client();
 
     let router = Router::new().push(router::config_router()).push(

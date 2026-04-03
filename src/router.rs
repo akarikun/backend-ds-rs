@@ -2,6 +2,7 @@ use crate::commons::utils::CONFIG as config;
 use crate::commons::utils::{self};
 use crate::distributed;
 use crate::worker_task;
+use bytes::Bytes;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use salvo::prelude::*;
@@ -28,12 +29,12 @@ fn valid_user(userid: &str, validuser: &str) -> bool {
     }
 }
 
-fn to_value(_evt: &str, data: &Data<Value>) -> Result<Value, serde_json::Error> {
-    if let Ok(data) = serde_json::from_value::<String>(data.0.clone()) {
-        let data = serde_json::from_str::<Value>(&data)?;
-        return Ok(data);
-    }
-    return Ok(json!({}));
+fn decode_msgpack(data: &Data<Bytes>) -> Result<Value, rmp_serde::decode::Error> {
+    rmp_serde::from_slice(data.0.as_ref())
+}
+
+fn encode_msgpack(value: &Value) -> Option<Bytes> {
+    rmp_serde::to_vec(value).ok().map(Bytes::from)
 }
 
 async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value>) {
@@ -79,15 +80,19 @@ async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value>) {
         }
     }
 
-    // 鉴权通过后，在这里挂玩家消息事件处理；create_user 和普通登录都会走到这里。
+    // 鉴权通过后，在这里挂玩家消息事件处理器
     socket.on(
         "message",
-        |socket: SocketRef, data: Data<Value>| async move {
-            match to_value("message", &data) {
+        |socket: SocketRef, data: Data<Bytes>| async move {
+            match decode_msgpack(&data) {
                 Ok(data) => {
-                    dbg!("message", socket.id, &data);
-                    if let Some((event, resp)) = worker_task::run_client_task(data).await {
-                        _ = socket.emit(event.as_str(), &resp);
+                    // dbg!("message", socket.id, &data);
+                    if let Some((event, resp)) = worker_task::run_client_task(data.clone()).await {
+                        if let Some(payload) = encode_msgpack(&resp) {
+                            _ = socket.emit(event.as_str(), &payload);
+                        }
+                    } else {
+                        dbg!("unknown_message", socket.id, &data);
                     }
                 }
                 Err(err) => {
