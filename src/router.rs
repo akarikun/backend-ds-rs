@@ -1,7 +1,7 @@
-use crate::commons::db;
 use crate::commons::utils::CONFIG as config;
 use crate::commons::utils::{self};
 use crate::distributed;
+use crate::worker_task;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use salvo::prelude::*;
@@ -86,33 +86,8 @@ async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value>) {
             match to_value("message", &data) {
                 Ok(data) => {
                     dbg!("message", socket.id, &data);
-                    let cmd = data.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-                    if cmd == "create_player" {
-                        let userid = data.get("userid").and_then(|v| v.as_str()).unwrap_or("");
-                        let nickname = data
-                            .get("nickname")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("player");
-
-                        let resp = if userid.is_empty() {
-                            json!({
-                                "ok": false,
-                                "error": "userid is empty",
-                            })
-                        } else {
-                            match db::create_player_info(userid, nickname).await {
-                                Ok(player) => json!({
-                                    "ok": true,
-                                    "player": player,
-                                }),
-                                Err(err) => json!({
-                                    "ok": false,
-                                    "error": err,
-                                }),
-                            }
-                        };
-
-                        _ = socket.emit("create_player_result", &resp);
+                    if let Some((event, resp)) = worker_task::run_client_task(data).await {
+                        _ = socket.emit(event.as_str(), &resp);
                     }
                 }
                 Err(err) => {

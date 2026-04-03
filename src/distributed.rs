@@ -406,6 +406,20 @@ fn release_worker_load(worker_id: &str, task_cost: u64) {
     }
 }
 
+fn should_master_run_task_locally(task: &Value) -> bool {
+    matches!(
+        task.get("type").and_then(|value| value.as_str()).unwrap_or(""),
+        "create_player"
+    )
+}
+
+async fn run_task_on_master(task: Value, task_cost: u64) -> Value {
+    WORKER_CURRENT_LOAD.fetch_add(task_cost, Ordering::Relaxed);
+    let result = worker_task::run_worker_task(task).await;
+    WORKER_CURRENT_LOAD.fetch_sub(task_cost, Ordering::Relaxed);
+    result
+}
+
 async fn report_load(socket: &SocketRef, msg: &Value) {
     let Some(node_id) = current_node_id(socket) else {
         return;
@@ -443,12 +457,55 @@ async fn dispatch_task(socket: &SocketRef, msg: &Value) {
     };
 
     let task_cost = task_cost_of(msg);
+    if should_master_run_task_locally(&task) {
+        _ = socket.emit(
+            "dispatch_result",
+            &json!({
+                "ok": true,
+                "worker_id": config.distributed.node_id,
+                "task_cost": task_cost,
+                "local_exec": true,
+                "ts": now_ts(),
+            }),
+        );
+
+        let result = run_task_on_master(task, task_cost).await;
+        _ = socket.emit(
+            "task_result",
+            &json!({
+                "worker_id": config.distributed.node_id,
+                "task_cost": task_cost,
+                "result": result,
+                "local_exec": true,
+                "ts": now_ts(),
+            }),
+        );
+        return;
+    }
+
     let Some(worker) = reserve_worker_load(task_cost) else {
         _ = socket.emit(
             "dispatch_result",
             &json!({
-                "ok": false,
-                "error": "no_available_worker",
+                "ok": true,
+                "worker_id": config.distributed.node_id,
+                "task_cost": task_cost,
+                "local_exec": true,
+                "fallback_reason": "no_available_worker",
+                "ts": now_ts(),
+            }),
+        );
+
+        let result = run_task_on_master(task, task_cost).await;
+        _ = socket.emit(
+            "task_result",
+            &json!({
+                "worker_id": config.distributed.node_id,
+                "task_cost": task_cost,
+                "result": result,
+                "local_exec": true,
+                "fallback_reason": "no_available_worker",
+                "ts": now_ts(),
             }),
         );
         return;

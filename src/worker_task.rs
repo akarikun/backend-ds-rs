@@ -14,8 +14,32 @@ lazy_static::lazy_static! {
     };
 }
 
+pub fn has_task_handler(task_type: &str) -> bool {
+    TASK_METHODS.contains_key(task_type)
+}
+
+pub async fn run_client_task(mut task: Value) -> Option<(String, Value)> {
+    let task_type = task
+        .get("cmd")
+        .or_else(|| task.get("type"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if !has_task_handler(&task_type) {
+        return None;
+    }
+
+    task["type"] = json!(task_type);
+    let result = run_worker_task(task).await;
+    Some((format!("{task_type}_result"), result))
+}
+
 pub async fn run_worker_task(task: Value) -> Value {
-    let task_type = task.get("type").and_then(|value| value.as_str()).unwrap_or("");
+    let task_type = task
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     if let Some(handler) = TASK_METHODS.get(task_type) {
         return handler(task).await;
     }
@@ -30,7 +54,10 @@ pub async fn run_worker_task(task: Value) -> Value {
 
 fn create_player_task(task: Value) -> BoxFuture<'static, Value> {
     async move {
-        let userid = task.get("userid").and_then(|value| value.as_str()).unwrap_or("");
+        let userid = task
+            .get("userid")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let nickname = task
             .get("nickname")
             .and_then(|value| value.as_str())
