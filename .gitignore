@@ -1,0 +1,4 @@
+/target
+.codex
+config.json
+test_ds.sh

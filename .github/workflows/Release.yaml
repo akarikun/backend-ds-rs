@@ -1,0 +1,35 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      
+    #   - name: Setup Rust
+    #     uses: actions-rs/toolchain@v1
+    #     with:
+    #       toolchain: stable
+    #       target: x86_64-unknown-linux-gnu
+
+    #   - name: Create index.html
+    #     run: mkdir web && echo "hello world" > web/index.html
+
+      - name: Build Rust backend
+        run: cargo build --release
+
+      - name: Upload Release Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-ds
+          path: target/release/backend-ds

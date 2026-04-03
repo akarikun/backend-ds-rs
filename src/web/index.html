@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backend DS Dashboard</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #0f172a;
+      color: #e5e7eb;
+      font-family: Arial, sans-serif;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .title {
+      margin: 0 0 12px;
+      font-size: 18px;
+      color: #93c5fd;
+    }
+    .value {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin: 0;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 8px;
+      border-bottom: 1px solid #1f2937;
+    }
+    th {
+      color: #93c5fd;
+    }
+    .self-node {
+      background: rgba(34, 197, 94, 0.12);
+      color: #86efac;
+    }
+    .badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #14532d;
+      color: #bbf7d0;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="card">
+      <h2 class="title">已连接 Worker 数量</h2>
+      <div class="value" id="workerCount">0</div>
+      <table>
+        <thead>
+          <tr>
+            <th>节点</th>
+            <th>地址</th>
+            <th>负载</th>
+            <th>心跳时间</th>
+          </tr>
+        </thead>
+        <tbody id="workerRows"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2 class="title">玩家在线数</h2>
+      <div class="value" id="playerCount">0</div>
+    </div>
+
+    <div class="card">
+      <h2 class="title">当前节点 / 当前配置</h2>
+      <div class="value" id="selfNodeId">-</div>
+      <pre id="selfNodeInfo">{}</pre>
+      <br>
+      <pre id="configInfo">{}</pre>
+    </div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    function formatTime(ts) {
+      if (!ts) return "-";
+      return new Date(ts * 1000).toLocaleString();
+    }
+
+    function renderDashboard(data) {
+      const cfg = data.config ?? {};
+      const selfNode = cfg.distributed ?? {};
+
+      document.getElementById("selfNodeId").textContent =
+        selfNode.node_id ?? "-";
+      document.getElementById("selfNodeInfo").textContent =
+        JSON.stringify({
+          node_role: selfNode.node_role,
+          node_addr: selfNode.node_addr,
+          master_addr: selfNode.master_addr
+        }, null, 2);
+
+      document.getElementById("workerCount").textContent =
+        data.distributed.worker_count ?? 0;
+      document.getElementById("playerCount").textContent =
+        data.player_count ?? 0;
+      document.getElementById("configInfo").textContent =
+        JSON.stringify(cfg, null, 2);
+
+      const rows = (data.distributed.workers ?? [])
+        .map((node) => `
+          <tr class="${node.node_id === selfNode.node_id ? "self-node" : ""}">
+            <td>
+              ${node.node_id ?? ""}
+              ${node.node_id === selfNode.node_id ? "<span class=\"badge\">本机</span>" : ""}
+            </td>
+            <td>${node.addr ?? ""}</td>
+            <td>${node.current_load ?? 0}/${node.max_load ?? 0}</td>
+            <td>${formatTime(node.last_heartbeat)}</td>
+          </tr>
+        `)
+        .join("");
+
+      document.getElementById("workerRows").innerHTML =
+        rows || "<tr><td colspan=\"4\">暂无 worker 连接</td></tr>";
+    }
+
+    async function connectDashboard() {
+      const res = await fetch("/api/dashboard", { cache: "no-store" });
+      const meta = await res.json();
+      const socket = io(meta.dashboard_ns, {
+        path: meta.socket_path || "/socket.io"
+      });
+
+      socket.on("dashboard", renderDashboard);
+    }
+
+    connectDashboard();
+  </script>
+</body>
+</html>
