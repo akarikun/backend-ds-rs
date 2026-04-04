@@ -125,7 +125,7 @@ fn dashboard_state() -> Value {
                 "kind": db.kind,
                 "mongodb_uri": mask_secret_url(db.mongodb_uri.as_str()),
                 "mongodb_db": db.mongodb_db,
-                "postgresql_url": mask_secret_url(db.postgresql_url.as_str()),
+                "sql_url": mask_secret_url(db.sql_url.as_str()),
             },
             "redis": {
                 "enabled": redis.enabled,

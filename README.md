@@ -2,9 +2,9 @@
 
 ##### 使用`Salvo` + `Socket.IO`
 
-- 推荐部署顺序：运行当前程序会在当前目录添加 `config.json` 配置，然后退出程序；如果是 PostgreSQL 空库，先调用一次 `cargo test test_init_postgresql_schema --lib -- --nocapture` 初始化表结构，更新 `config.json` 配置后，再运行当前程序。
+- 推荐部署顺序：运行当前程序会在当前目录添加 `config.json` 配置，然后退出程序；如果是 PostgreSQL 空库，先调用一次 `cargo test test_init_postgresql_schema --lib -- --nocapture` 初始化表结构（非必需操作，主要用于测试），更新 `config.json` 配置后，再运行当前程序。
 - 当前架构边界：建议按单 master + 多 worker 使用，暂时不要直接扩成多 master，避免 addon 同步和调度一致性变复杂。
-- `task_idempotency` 现在不会自动清理，长期运行后表数据会持续增长，后面可以按保留天数加一个定期清理策略。
+- `task_idempotency` 不是所有任务必需的数据表/集合，只有请求里显式传了 `task_id` 才会用它做幂等和结果回放；如果暂时不需要任务幂等，可以先不创建这张表/集合。启用后它目前不会自动清理，长期运行会持续增长，后面可以按保留天数加一个定期清理策略。
 - addon JS 同步规则：worker 连接 master 时会同步 master 的脚本；如果 master 上更新了 `addons/*.js`，需要 master 重启或 worker 重连后 worker 才会拿到新版本。
 - 正式部署前建议做一次完整联调：master、worker、PostgreSQL/MongoDB、Redis、玩家创建/查询、发奖、邮件、幂等重试、dashboard 页面展示都跑一遍。
 
@@ -20,7 +20,7 @@
     "kind": "postgresql",
     "mongodb_uri": "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds",
     "mongodb_db": "backend_ds",
-    "postgresql_url": "postgresql://postgres:postgres@127.0.0.1:5432/backend_ds"
+    "sql_url": "postgresql://postgres:postgres@127.0.0.1:5432/backend_ds"
   },
   "redis":{
     "enabled": false,
@@ -42,6 +42,14 @@
 }
 ```
 
+`db.kind` 和 `db.sql_url` 说明：
+
+- `postgresql`: `sql_url` 形如 `postgresql://postgres:postgres@127.0.0.1:5432/backend_ds`
+- `mysql`: `sql_url` 形如 `mysql://root:123456@127.0.0.1:3306/backend_ds`
+- `sqlite`: `sql_url` 形如 `sqlite://./backend_ds.db`
+- `mongodb`: 使用 `mongodb_uri + mongodb_db`
+
+
 ### 分布式任务流程
 
 - Worker 启动后会主动连接 master 的 `distributed.server_ns`，注册自身 `node_id/node_role/node_addr/max_load`。
@@ -50,7 +58,7 @@
 - Worker 执行完成后向 master 发 `server_msg { "cmd": "task_result", ... }`，master 按 `task_id/attempt` 找回原始请求方并转发 `task_result`。
 - Master 侧会对远端任务做超时监控，超时后按 `max_retries` 自动重派；重试耗尽返回 `task_timeout`。
 
-### test_init_postgresql_schema
+### test_init_postgresql_schema（非必需操作，主要用于测试）
 ##### 玩家数据表
 
 注意：如果 PostgreSQL 是空库，启动服务前必须先跑一次 `test_init_postgresql_schema`，这个测试方法内部会调用 `init_postgresql_schema()` 初始化表结构，否则业务 SQL 会因为表不存在而失败。
@@ -121,6 +129,8 @@ http://0.0.0.0:8082/addon-test.html
 ### 任务幂等和重试规则
 
 - `task_id` 相同表示同一笔业务任务。建议非幂等写操作都显式传 `task_id`，例如发奖、发邮件、扣道具。
+- 如果请求里不传 `task_id`，worker 会直接执行任务，不会访问 `task_idempotency`，因此没有这张表/集合也能运行普通任务。
+- 如果请求里传了 `task_id`，但数据库里没有 `task_idempotency` 表/集合，这次任务会直接返回数据库错误。
 - Worker 真正执行业务前会先抢占 `task_idempotency` 记录；抢到锁才执行，已完成则直接回放旧结果。
 - 如果同一 `task_id` 正在执行中，后来的重复请求会最多等待 10 秒轮询旧结果；等到则直接回放，等不到返回 `task_running_wait_timeout`。
 - 如果 worker 执行中崩溃，`running` 幂等记录超过 300 秒没更新后，允许新 attempt 接管这条 `task_id` 继续执行。

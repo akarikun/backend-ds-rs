@@ -3,22 +3,18 @@ mod commons;
 mod worker_task;
 
 use commons::utils::CONFIG as config;
-use tokio_postgres::{Client, NoTls};
+use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 pub async fn init_postgresql_schema() -> Result<(), String> {
-    let (client, connection) = tokio_postgres::connect(&config.db.postgresql_url, NoTls)
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&config.db.sql_url)
         .await
         .map_err(|err| err.to_string())?;
 
-    tokio::spawn(async move {
-        if let Err(err) = connection.await {
-            dbg!("postgres_schema_connection_error", err.to_string());
-        }
-    });
-
-    client
-        .batch_execute(
-            "create table if not exists player_profiles (
+    sqlx::raw_sql(
+        "create table if not exists player_profiles (
                 userid text primary key,
                 nickname text not null,
                 level bigint not null default 1,
@@ -68,26 +64,26 @@ pub async fn init_postgresql_schema() -> Result<(), String> {
             alter table player_profiles alter column level type bigint;
             alter table player_profiles alter column avatar_id type bigint;
             alter table player_wallets alter column stamina type bigint;",
-        )
-        .await
-        .map_err(|err| err.to_string())?;
+    )
+    .execute(&pool)
+    .await
+    .map_err(|err| err.to_string())?;
 
-    migrate_legacy_players(&client).await
+    migrate_legacy_players(&pool).await
 }
 
-async fn migrate_legacy_players(client: &Client) -> Result<(), String> {
-    let row = client
-        .query_one("select to_regclass('public.players') is not null", &[])
+async fn migrate_legacy_players(pool: &PgPool) -> Result<(), String> {
+    let row: (bool,) = sqlx::query_as("select to_regclass('public.players') is not null")
+        .fetch_one(pool)
         .await
         .map_err(|err| err.to_string())?;
-    let has_legacy_table: bool = row.get(0);
+    let has_legacy_table = row.0;
     if !has_legacy_table {
         return Ok(());
     }
 
-    client
-        .batch_execute(
-            "insert into player_profiles (userid, nickname)
+    sqlx::raw_sql(
+        "insert into player_profiles (userid, nickname)
              select userid, nickname
              from players
              on conflict (userid)
@@ -99,9 +95,11 @@ async fn migrate_legacy_players(client: &Client) -> Result<(), String> {
              on conflict (userid) do nothing;
 
              drop table if exists players;",
-        )
-        .await
-        .map_err(|err| err.to_string())
+    )
+    .execute(pool)
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

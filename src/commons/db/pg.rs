@@ -2,43 +2,35 @@ use crate::commons::db::{DbDriver, TASK_RUNNING_STALE_SECS};
 use crate::commons::utils::CONFIG as config;
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::time::{Duration, SystemTime};
-use tokio::sync::Mutex;
-use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{Client, GenericClient, NoTls, Row};
 
 pub struct PgDb {
-    client: Mutex<Client>,
+    pool: PgPool,
 }
 
 impl PgDb {
     pub async fn new() -> Result<Self, String> {
-        let (client, connection) = tokio_postgres::connect(&config.db.postgresql_url, NoTls)
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .connect(&config.db.sql_url)
             .await
             .map_err(|err| err.to_string())?;
 
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                dbg!("postgres_connection_error", err.to_string());
-            }
-        });
-
-        Ok(Self {
-            client: Mutex::new(client),
-        })
+        Ok(Self { pool })
     }
 }
 
 #[async_trait]
 impl DbDriver for PgDb {
     async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Value>, String> {
-        let client = self.client.lock().await;
-        pg_query_rows(&*client, sql, params).await
+        let mut conn = self.pool.acquire().await.map_err(|err| err.to_string())?;
+        pg_query_rows(&mut *conn, sql, params).await
     }
 
     async fn transaction(&self, queries: Vec<Value>) -> Result<Vec<Value>, String> {
-        let mut client = self.client.lock().await;
-        let tx = client.transaction().await.map_err(|err| err.to_string())?;
+        let mut tx = self.pool.begin().await.map_err(|err| err.to_string())?;
         let mut results = Vec::with_capacity(queries.len());
 
         for query in queries.iter() {
@@ -57,7 +49,7 @@ impl DbDriver for PgDb {
                 .and_then(|value| value.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let rows = pg_query_rows(&tx, sql, params).await?;
+            let rows = pg_query_rows(&mut *tx, sql, params).await?;
             results.push(Value::Array(rows));
         }
 
@@ -76,16 +68,18 @@ impl DbDriver for PgDb {
         attempt: u64,
     ) -> Result<Option<Value>, String> {
         let attempt = attempt as i64;
-        let client = self.client.lock().await;
-        let inserted = client
-            .execute(
-                "insert into task_idempotency (task_id, task_type, status, attempt)
+        let inserted = sqlx::query(
+            "insert into task_idempotency (task_id, task_type, status, attempt)
                  values ($1, $2, 'running', $3)
                  on conflict (task_id) do nothing",
-                &[&task_id, &task_type, &attempt],
-            )
-            .await
-            .map_err(|err| err.to_string())?;
+        )
+        .bind(task_id)
+        .bind(task_type)
+        .bind(attempt)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?
+        .rows_affected();
         if inserted > 0 {
             return Ok(None);
         }
@@ -93,9 +87,9 @@ impl DbDriver for PgDb {
         let stale_before = SystemTime::now()
             .checked_sub(Duration::from_secs(TASK_RUNNING_STALE_SECS))
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let reclaimed = client
-            .execute(
-                "update task_idempotency
+        let stale_before = chrono::DateTime::<chrono::Utc>::from(stale_before);
+        let reclaimed = sqlx::query(
+            "update task_idempotency
                  set task_type = $2,
                      status = 'running',
                      attempt = $3,
@@ -105,24 +99,27 @@ impl DbDriver for PgDb {
                    and status = 'running'
                    and attempt <= $3
                    and updated_at < $4",
-                &[&task_id, &task_type, &attempt, &stale_before],
-            )
-            .await
-            .map_err(|err| err.to_string())?;
+        )
+        .bind(task_id)
+        .bind(task_type)
+        .bind(attempt)
+        .bind(stale_before)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?
+        .rows_affected();
         if reclaimed > 0 {
             return Ok(None);
         }
 
-        let row = client
-            .query_one(
-                "select status, result from task_idempotency where task_id = $1",
-                &[&task_id],
-            )
+        let row = sqlx::query("select status, result from task_idempotency where task_id = $1")
+            .bind(task_id)
+            .fetch_one(&self.pool)
             .await
             .map_err(|err| err.to_string())?;
-        let status: String = row.get(0);
+        let status: String = row.try_get(0).map_err(|err| err.to_string())?;
         if status == "done" {
-            let result = row.try_get::<usize, Value>(1).ok().unwrap_or(Value::Null);
+            let result = row.try_get::<Value, usize>(1).ok().unwrap_or(Value::Null);
             return Ok(Some(result));
         }
 
@@ -130,37 +127,41 @@ impl DbDriver for PgDb {
     }
 
     async fn finish_task(&self, task_id: &str, result: &Value) -> Result<(), String> {
-        let client = self.client.lock().await;
-        client
-            .execute(
-                "update task_idempotency
+        sqlx::query(
+            "update task_idempotency
                  set status = 'done', result = $2, updated_at = now()
                  where task_id = $1",
-                &[&task_id, &result],
-            )
-            .await
-            .map_err(|err| err.to_string())?;
+        )
+        .bind(task_id)
+        .bind(result)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?;
         Ok(())
     }
 }
 
-async fn pg_query_rows(
-    client: &(impl GenericClient + Sync),
+async fn pg_query_rows<'e, E>(
+    executor: E,
     sql: &str,
     params: Vec<Value>,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, String>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let sql = normalize_sql_placeholders(sql);
-    let values = params.into_iter().map(pg_param_value).collect::<Vec<_>>();
-    let refs = values
-        .iter()
-        .map(|value| value.as_ref() as &(dyn ToSql + Sync))
-        .collect::<Vec<_>>();
+    let mut query = sqlx::query(sql.as_str());
+    for param in params.into_iter() {
+        query = pg_bind_param(query, param);
+    }
 
-    let rows = client
-        .query(sql.as_str(), refs.as_slice())
+    let rows = query
+        .fetch_all(executor)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(rows.iter().map(pg_row_to_json).collect())
+    rows.into_iter()
+        .map(pg_row_to_json)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn normalize_sql_placeholders(sql: &str) -> String {
@@ -178,51 +179,85 @@ fn normalize_sql_placeholders(sql: &str) -> String {
     out
 }
 
-fn pg_param_value(value: Value) -> Box<dyn ToSql + Sync + Send> {
+fn pg_bind_param<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    value: Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match value {
-        Value::Bool(v) => Box::new(v),
+        Value::Bool(v) => query.bind(v),
         Value::Number(v) => {
             if let Some(v) = v.as_i64() {
-                Box::new(v)
+                query.bind(v)
             } else {
                 let v = v.as_f64().unwrap_or_default();
                 if v.fract() == 0.0 {
-                    Box::new(v as i64)
+                    query.bind(v as i64)
                 } else {
-                    Box::new(v)
+                    query.bind(v)
                 }
             }
         }
-        Value::String(v) => Box::new(v),
-        Value::Array(v) => Box::new(Value::Array(v)),
-        Value::Object(v) => Box::new(Value::Object(v)),
-        Value::Null => Box::new(Option::<String>::None),
+        Value::String(v) => query.bind(v),
+        Value::Array(v) => query.bind(Value::Array(v)),
+        Value::Object(v) => query.bind(Value::Object(v)),
+        Value::Null => query.bind(Option::<String>::None),
     }
 }
 
-fn pg_row_to_json(row: &Row) -> Value {
+fn pg_row_to_json(row: PgRow) -> Result<Value, String> {
     let mut item = serde_json::Map::new();
     for (index, column) in row.columns().iter().enumerate() {
-        let value = match *column.type_() {
-            Type::BOOL => json!(row.get::<usize, bool>(index)),
-            Type::INT2 => json!(row.get::<usize, i16>(index)),
-            Type::INT4 => json!(row.get::<usize, i32>(index)),
-            Type::INT8 => json!(row.get::<usize, i64>(index)),
-            Type::FLOAT4 => json!(row.get::<usize, f32>(index)),
-            Type::FLOAT8 => json!(row.get::<usize, f64>(index)),
-            Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::NAME => {
-                json!(row.get::<usize, String>(index))
-            }
-            Type::JSON | Type::JSONB => row.get::<usize, Value>(index),
-            Type::TIMESTAMPTZ => json!(
-                row.get::<usize, SystemTime>(index)
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|ts| ts.as_millis() as i64)
-                    .unwrap_or(0)
+        let type_name = column.type_info().name().to_ascii_uppercase();
+        let value = match type_name.as_str() {
+            "BOOL" => json!(
+                row.try_get::<Option<bool>, _>(index)
+                    .map_err(|err| err.to_string())?
             ),
-            _ => json!(format!("{:?}", column.type_())),
+            "INT2" => json!(
+                row.try_get::<Option<i16>, _>(index)
+                    .map_err(|err| err.to_string())?
+            ),
+            "INT4" => json!(
+                row.try_get::<Option<i32>, _>(index)
+                    .map_err(|err| err.to_string())?
+            ),
+            "INT8" => json!(
+                row.try_get::<Option<i64>, _>(index)
+                    .map_err(|err| err.to_string())?
+            ),
+            "FLOAT4" => {
+                json!(
+                    row.try_get::<Option<f32>, _>(index)
+                        .map_err(|err| err.to_string())?
+                )
+            }
+            "FLOAT8" => {
+                json!(
+                    row.try_get::<Option<f64>, _>(index)
+                        .map_err(|err| err.to_string())?
+                )
+            }
+            "VARCHAR" | "TEXT" | "BPCHAR" | "NAME" => {
+                json!(
+                    row.try_get::<Option<String>, _>(index)
+                        .map_err(|err| err.to_string())?
+                )
+            }
+            "JSON" | "JSONB" => row
+                .try_get::<Option<Value>, _>(index)
+                .map_err(|err| err.to_string())?
+                .unwrap_or(Value::Null),
+            "TIMESTAMPTZ" => {
+                let value = row
+                    .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(index)
+                    .map_err(|err| err.to_string())?
+                    .map(|ts| ts.timestamp_millis())
+                    .unwrap_or(0);
+                json!(value)
+            }
+            _ => json!(type_name),
         };
         item.insert(column.name().to_string(), value);
     }
-    Value::Object(item)
+    Ok(Value::Object(item))
 }

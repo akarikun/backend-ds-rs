@@ -24,14 +24,14 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize, Debug)]
 #[serde(default)]
 pub struct DbConfig {
-    // 数据库类型：mongodb 或 postgresql。
+    // 数据库类型：mongodb、postgresql、mysql、sqlite。
     pub kind: String,
     // MongoDB 连接串。
     pub mongodb_uri: String,
     // MongoDB 数据库名。
     pub mongodb_db: String,
-    // PostgreSQL 连接串。
-    pub postgresql_url: String,
+    // SQL 数据库连接串：PostgreSQL/MySQL/SQLite 共用。
+    pub sql_url: String,
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
@@ -106,8 +106,7 @@ impl Default for DbConfig {
             kind: "mongodb".to_string(),
             mongodb_uri: "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds".to_string(),
             mongodb_db: "backend_ds".to_string(),
-            postgresql_url: "postgres://postgres:123456@localhost:5432/backend_ds"
-                .to_string(),
+            sql_url: "postgres://postgres:123456@localhost:5432/backend_ds".to_string(),
         }
     }
 }

@@ -48,9 +48,7 @@ pub async fn redis_set(key: &str, value: &Value, ttl_secs: Option<u64>) -> Resul
 
     let key = redis_key(key);
     let text = serde_json::to_string(value).map_err(|err| err.to_string())?;
-    let ttl_secs = ttl_secs
-        .unwrap_or(config.redis.default_ttl_secs)
-        .max(1);
+    let ttl_secs = ttl_secs.unwrap_or(config.redis.default_ttl_secs).max(1);
     let _: () = conn
         .set_ex(key, text, ttl_secs)
         .await
