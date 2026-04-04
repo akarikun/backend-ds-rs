@@ -22,63 +22,6 @@ impl PgDb {
             }
         });
 
-        client
-            .batch_execute(
-                "create table if not exists player_profiles (
-                    userid text primary key,
-                    nickname text not null,
-                    level bigint not null default 1,
-                    exp bigint not null default 0,
-                    avatar_id bigint not null default 0,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-
-                create table if not exists player_wallets (
-                    userid text primary key references player_profiles(userid) on delete cascade,
-                    gold bigint not null default 0,
-                    diamond bigint not null default 0,
-                    stamina bigint not null default 100,
-                    updated_at timestamptz not null default now()
-                );
-
-                create table if not exists player_items (
-                    id bigserial primary key,
-                    userid text not null references player_profiles(userid) on delete cascade,
-                    item_id text not null,
-                    item_count bigint not null default 0,
-                    updated_at timestamptz not null default now(),
-                    unique(userid, item_id)
-                );
-
-                create table if not exists player_mails (
-                    id bigserial primary key,
-                    userid text not null references player_profiles(userid) on delete cascade,
-                    title text not null,
-                    content text not null default '',
-                    attachments jsonb not null default '[]'::jsonb,
-                    status text not null default 'unread',
-                    created_at timestamptz not null default now()
-                );
-
-                create table if not exists task_idempotency (
-                    task_id text primary key,
-                    task_type text not null,
-                    status text not null default 'running',
-                    attempt bigint not null default 1,
-                    result jsonb,
-                    created_at timestamptz not null default now(),
-                    updated_at timestamptz not null default now()
-                );
-
-                alter table player_profiles alter column level type bigint;
-                alter table player_profiles alter column avatar_id type bigint;
-                alter table player_wallets alter column stamina type bigint;",
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-        migrate_legacy_players(&client).await?;
-
         Ok(Self { client })
     }
 }
@@ -239,33 +182,4 @@ fn pg_row_to_json(row: &Row) -> Value {
         item.insert(column.name().to_string(), value);
     }
     Value::Object(item)
-}
-
-async fn migrate_legacy_players(client: &Client) -> Result<(), String> {
-    let row = client
-        .query_one("select to_regclass('public.players') is not null", &[])
-        .await
-        .map_err(|err| err.to_string())?;
-    let has_legacy_table: bool = row.get(0);
-    if !has_legacy_table {
-        return Ok(());
-    }
-
-    client
-        .batch_execute(
-            "insert into player_profiles (userid, nickname)
-             select userid, nickname
-             from players
-             on conflict (userid)
-             do update set nickname = excluded.nickname;
-
-             insert into player_wallets (userid)
-             select userid
-             from players
-             on conflict (userid) do nothing;
-
-             drop table if exists players;",
-        )
-        .await
-        .map_err(|err| err.to_string())
 }

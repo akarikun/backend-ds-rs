@@ -2,6 +2,108 @@ mod addons_runtime;
 mod commons;
 mod worker_task;
 
+use commons::utils::CONFIG as config;
+use tokio_postgres::{Client, NoTls};
+
+pub async fn init_postgresql_schema() -> Result<(), String> {
+    let (client, connection) = tokio_postgres::connect(&config.db.postgresql_url, NoTls)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            dbg!("postgres_schema_connection_error", err.to_string());
+        }
+    });
+
+    client
+        .batch_execute(
+            "create table if not exists player_profiles (
+                userid text primary key,
+                nickname text not null,
+                level bigint not null default 1,
+                exp bigint not null default 0,
+                avatar_id bigint not null default 0,
+                created_at timestamptz not null default now(),
+                updated_at timestamptz not null default now()
+            );
+
+            create table if not exists player_wallets (
+                userid text primary key references player_profiles(userid) on delete cascade,
+                gold bigint not null default 0,
+                diamond bigint not null default 0,
+                stamina bigint not null default 100,
+                updated_at timestamptz not null default now()
+            );
+
+            create table if not exists player_items (
+                id bigserial primary key,
+                userid text not null references player_profiles(userid) on delete cascade,
+                item_id text not null,
+                item_count bigint not null default 0,
+                updated_at timestamptz not null default now(),
+                unique(userid, item_id)
+            );
+
+            create table if not exists player_mails (
+                id bigserial primary key,
+                userid text not null references player_profiles(userid) on delete cascade,
+                title text not null,
+                content text not null default '',
+                attachments jsonb not null default '[]'::jsonb,
+                status text not null default 'unread',
+                created_at timestamptz not null default now()
+            );
+
+            create table if not exists task_idempotency (
+                task_id text primary key,
+                task_type text not null,
+                status text not null default 'running',
+                attempt bigint not null default 1,
+                result jsonb,
+                created_at timestamptz not null default now(),
+                updated_at timestamptz not null default now()
+            );
+
+            alter table player_profiles alter column level type bigint;
+            alter table player_profiles alter column avatar_id type bigint;
+            alter table player_wallets alter column stamina type bigint;",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+    migrate_legacy_players(&client).await
+}
+
+async fn migrate_legacy_players(client: &Client) -> Result<(), String> {
+    let row = client
+        .query_one("select to_regclass('public.players') is not null", &[])
+        .await
+        .map_err(|err| err.to_string())?;
+    let has_legacy_table: bool = row.get(0);
+    if !has_legacy_table {
+        return Ok(());
+    }
+
+    client
+        .batch_execute(
+            "insert into player_profiles (userid, nickname)
+             select userid, nickname
+             from players
+             on conflict (userid)
+             do update set nickname = excluded.nickname;
+
+             insert into player_wallets (userid)
+             select userid
+             from players
+             on conflict (userid) do nothing;
+
+             drop table if exists players;",
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -165,5 +267,12 @@ mod tests {
             item.get("item_id").and_then(|value| value.as_str()) == Some("potion_001")
                 && item.get("item_count").and_then(|value| value.as_i64()) == Some(3)
         }));
+    }
+
+    #[tokio::test]
+    async fn test_init_postgresql_schema() {
+        if let Err(err) = crate::init_postgresql_schema().await {
+            eprintln!("init_postgresql_schema failed: {err}");
+        }
     }
 }

@@ -8,7 +8,10 @@
 - Worker 执行完成后向 master 发 `server_msg { "cmd": "task_result", ... }`，master 按 `task_id/attempt` 找回原始请求方并转发 `task_result`。
 - Master 侧会对远端任务做超时监控，超时后按 `max_retries` 自动重派；重试耗尽返回 `task_timeout`。
 
-### 玩家数据表
+### test_init_postgresql_schema
+##### 玩家数据表 
+
+注意：如果 PostgreSQL 是空库，启动服务前必须先跑一次 test_init_postgresql_schema()，否则业务 SQL 会因为表不存在而失败。
 
 - `player_profiles`: 玩家基础档案，保存昵称、等级、经验、头像、创建/更新时间。
 - `player_wallets`: 玩家货币账户，保存金币、钻石、体力。
@@ -16,6 +19,8 @@
 - `player_mails`: 玩家邮件，支持附件 JSON、已读/未读状态、发信时间。
 - `task_idempotency`: 分布式任务幂等表/集合，按 `task_id` 记录任务执行状态、attempt 和最终结果。
 
+部署完成后可以在addon-test.html测试
+http://0.0.0.0:8082/addon-test.html
 ### 分布式任务协议
 
 向 `/server` namespace 发送：
