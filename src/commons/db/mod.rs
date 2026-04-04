@@ -8,9 +8,18 @@ use tokio::sync::OnceCell;
 mod mongo;
 mod pg;
 
+pub(super) const TASK_RUNNING_STALE_SECS: u64 = 300;
+
 #[async_trait]
 trait DbDriver: Send + Sync {
     async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Value>, String>;
+    async fn try_begin_task(
+        &self,
+        task_id: &str,
+        task_type: &str,
+        attempt: u64,
+    ) -> Result<Option<Value>, String>;
+    async fn finish_task(&self, task_id: &str, result: &Value) -> Result<(), String>;
 }
 
 static DB_CONN: OnceCell<Box<dyn DbDriver>> = OnceCell::const_new();
@@ -34,4 +43,22 @@ pub async fn db_query(sql: &str, params: Vec<Value>) -> Result<Vec<Value>, Strin
         .get()
         .ok_or_else(|| "db not initialized".to_string())?;
     conn.query(sql, params).await
+}
+
+pub async fn try_begin_task(
+    task_id: &str,
+    task_type: &str,
+    attempt: u64,
+) -> Result<Option<Value>, String> {
+    let conn = DB_CONN
+        .get()
+        .ok_or_else(|| "db not initialized".to_string())?;
+    conn.try_begin_task(task_id, task_type, attempt).await
+}
+
+pub async fn finish_task(task_id: &str, result: &Value) -> Result<(), String> {
+    let conn = DB_CONN
+        .get()
+        .ok_or_else(|| "db not initialized".to_string())?;
+    conn.finish_task(task_id, result).await
 }

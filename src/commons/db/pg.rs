@@ -1,8 +1,8 @@
-use crate::commons::db::DbDriver;
+use crate::commons::db::{DbDriver, TASK_RUNNING_STALE_SECS};
 use crate::commons::utils::CONFIG as config;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, NoTls, Row};
 
@@ -61,6 +61,16 @@ impl PgDb {
                     created_at timestamptz not null default now()
                 );
 
+                create table if not exists task_idempotency (
+                    task_id text primary key,
+                    task_type text not null,
+                    status text not null default 'running',
+                    attempt bigint not null default 1,
+                    result jsonb,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                );
+
                 alter table player_profiles alter column level type bigint;
                 alter table player_profiles alter column avatar_id type bigint;
                 alter table player_wallets alter column stamina type bigint;",
@@ -89,6 +99,81 @@ impl DbDriver for PgDb {
             .await
             .map_err(|err| err.to_string())?;
         Ok(rows.iter().map(pg_row_to_json).collect())
+    }
+
+    async fn try_begin_task(
+        &self,
+        task_id: &str,
+        task_type: &str,
+        attempt: u64,
+    ) -> Result<Option<Value>, String> {
+        let attempt = attempt as i64;
+        let inserted = self
+            .client
+            .execute(
+                "insert into task_idempotency (task_id, task_type, status, attempt)
+                 values ($1, $2, 'running', $3)
+                 on conflict (task_id) do nothing",
+                &[&task_id, &task_type, &attempt],
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        if inserted > 0 {
+            return Ok(None);
+        }
+
+        let stale_before = SystemTime::now()
+            .checked_sub(Duration::from_secs(TASK_RUNNING_STALE_SECS))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let reclaimed = self
+            .client
+            .execute(
+                "update task_idempotency
+                 set task_type = $2,
+                     status = 'running',
+                     attempt = $3,
+                     result = null,
+                     updated_at = now()
+                 where task_id = $1
+                   and status = 'running'
+                   and attempt <= $3
+                   and updated_at < $4",
+                &[&task_id, &task_type, &attempt, &stale_before],
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        if reclaimed > 0 {
+            return Ok(None);
+        }
+
+        let row = self
+            .client
+            .query_one(
+                "select status, result from task_idempotency where task_id = $1",
+                &[&task_id],
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let status: String = row.get(0);
+        if status == "done" {
+            let result = row.try_get::<usize, Value>(1).ok().unwrap_or(Value::Null);
+            return Ok(Some(result));
+        }
+
+        Err("task_running".to_string())
+    }
+
+    async fn finish_task(&self, task_id: &str, result: &Value) -> Result<(), String> {
+        self.client
+            .execute(
+                "update task_idempotency
+                 set status = 'done', result = $2, updated_at = now()
+                 where task_id = $1",
+                &[&task_id, &result],
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(())
     }
 }
 

@@ -25,10 +25,23 @@ struct ServerNode {
     last_heartbeat: u64,
 }
 
+#[derive(Clone, Debug)]
+struct PendingTask {
+    requester_socket: SocketRef,
+    task: Value,
+    task_cost: u64,
+    worker_id: String,
+    attempt: u64,
+    retries_left: u64,
+    timeout_secs: u64,
+}
+
 lazy_static::lazy_static! {
     static ref SERVER_NODES: DashMap<String, ServerNode> = DashMap::new();
+    static ref PENDING_TASKS: DashMap<String, PendingTask> = DashMap::new();
     static ref MASTER_DASHBOARD: RwLock<Value> = RwLock::new(empty_dashboard_snapshot());
     static ref WORKER_CURRENT_LOAD: AtomicU64 = AtomicU64::new(0);
+    static ref MASTER_TASK_SEQ: AtomicU64 = AtomicU64::new(1);
 }
 
 pub fn start_worker_client() {
@@ -72,6 +85,30 @@ fn payload_task_cost(payload: &Payload) -> u64 {
         Payload::Text(values) => values
             .first()
             .and_then(|value| value.get("task_cost"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(1)
+            .max(1),
+        _ => 1,
+    }
+}
+
+fn payload_task_id(payload: &Payload) -> String {
+    match payload {
+        Payload::Text(values) => values
+            .first()
+            .and_then(|value| value.get("task_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn payload_task_attempt(payload: &Payload) -> u64 {
+    match payload {
+        Payload::Text(values) => values
+            .first()
+            .and_then(|value| value.get("attempt"))
             .and_then(|value| value.as_u64())
             .unwrap_or(1)
             .max(1),
@@ -224,13 +261,17 @@ async fn connect_master_once() -> Result<Client, rust_socketio::Error> {
         .on("task", |payload: Payload, client: Client| {
             async move {
                 let master_id = payload_master_id(&payload);
+                let task_id = payload_task_id(&payload);
+                let attempt = payload_task_attempt(&payload);
                 let task_cost = payload_task_cost(&payload);
-                let task = payload_task(&payload);
+                let task = attach_task_metadata(payload_task(&payload), &task_id, attempt);
                 WORKER_CURRENT_LOAD.fetch_add(task_cost, Ordering::Relaxed);
                 let task_result = worker_task::run_worker_task(task).await;
                 let result = json!({
                     "cmd": "task_result",
                     "master_id": master_id,
+                    "task_id": task_id,
+                    "attempt": attempt,
                     "task_cost": task_cost,
                     "result": task_result,
                 });
@@ -289,6 +330,8 @@ async fn run_worker_heartbeat(client: Client) {
 }
 
 fn node_snapshot() -> Value {
+    prune_expired_nodes();
+
     let nodes = SERVER_NODES
         .iter()
         .map(|entry| {
@@ -342,6 +385,8 @@ pub fn dashboard_snapshot() -> Value {
         return dashboard;
     }
 
+    prune_expired_nodes();
+
     let workers = SERVER_NODES
         .iter()
         .filter(|entry| entry.value().role == "worker")
@@ -384,7 +429,40 @@ fn task_cost_of(msg: &Value) -> u64 {
         .max(1)
 }
 
+fn task_id_of(msg: &Value) -> String {
+    msg.get("task_id")
+        .and_then(|value| value.as_str())
+        .filter(|task_id| !task_id.is_empty())
+        .map(|task_id| task_id.to_string())
+        .unwrap_or_else(|| {
+            let seq = MASTER_TASK_SEQ.fetch_add(1, Ordering::Relaxed);
+            format!("{}-{}-{seq}", config.distributed.node_id, now_ts())
+        })
+}
+
+fn task_attempt_of(msg: &Value) -> u64 {
+    msg.get("attempt")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn task_timeout_secs_of(msg: &Value) -> u64 {
+    msg.get("timeout_secs")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(config.distributed.node_timeout_secs.max(1))
+        .max(1)
+}
+
+fn task_retries_of(msg: &Value) -> u64 {
+    msg.get("max_retries")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1)
+}
+
 fn reserve_worker_load(task_cost: u64) -> Option<ServerNode> {
+    prune_expired_nodes();
+
     let worker_id = SERVER_NODES
         .iter()
         .filter(|entry| {
@@ -410,6 +488,161 @@ fn release_worker_load(worker_id: &str, task_cost: u64) {
     }
 }
 
+fn is_node_expired(node: &ServerNode, now: u64) -> bool {
+    let timeout_secs = config.distributed.node_timeout_secs;
+    timeout_secs > 0 && now.saturating_sub(node.last_heartbeat) > timeout_secs
+}
+
+fn prune_expired_nodes() {
+    let now = now_ts();
+    let expired_nodes = SERVER_NODES
+        .iter()
+        .filter(|entry| is_node_expired(entry.value(), now))
+        .map(|entry| entry.value().node_id.clone())
+        .collect::<Vec<_>>();
+
+    for node_id in expired_nodes {
+        if let Some((_, node)) = SERVER_NODES.remove(&node_id) {
+            _ = node.socket.disconnect();
+        }
+    }
+}
+
+fn build_worker_task_message(
+    master_id: String,
+    worker_id: String,
+    task_id: String,
+    attempt: u64,
+    task_cost: u64,
+    task: Value,
+) -> Value {
+    json!({
+        "from": master_id,
+        "worker_id": worker_id,
+        "task_id": task_id,
+        "attempt": attempt,
+        "task_cost": task_cost,
+        "task": task,
+        "ts": now_ts(),
+    })
+}
+
+fn attach_task_metadata(mut task: Value, task_id: &str, attempt: u64) -> Value {
+    if !task_id.is_empty() {
+        task["task_id"] = json!(task_id);
+    }
+    task["attempt"] = json!(attempt.max(1));
+    task
+}
+
+fn build_task_timeout_result(
+    task_id: &str,
+    attempt: u64,
+    worker_id: &str,
+    task_cost: u64,
+) -> Value {
+    json!({
+        "ok": false,
+        "error": "task_timeout",
+        "task_id": task_id,
+        "attempt": attempt,
+        "worker_id": worker_id,
+        "task_cost": task_cost,
+        "ts": now_ts(),
+    })
+}
+
+fn watch_task_timeout(task_id: String, attempt: u64, timeout_secs: u64) {
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(timeout_secs)).await;
+        retry_or_fail_timeout_task(task_id, attempt).await;
+    });
+}
+
+async fn retry_or_fail_timeout_task(task_id: String, attempt: u64) {
+    let Some(mut pending) = PENDING_TASKS.get_mut(&task_id) else {
+        return;
+    };
+
+    if pending.attempt != attempt {
+        return;
+    }
+
+    let requester_socket = pending.requester_socket.clone();
+    let task = pending.task.clone();
+    let task_cost = pending.task_cost;
+    let timeout_secs = pending.timeout_secs;
+    let old_worker_id = pending.worker_id.clone();
+
+    if pending.retries_left == 0 {
+        drop(pending);
+        PENDING_TASKS.remove(&task_id);
+        _ = requester_socket.emit(
+            "task_result",
+            &build_task_timeout_result(&task_id, attempt, &old_worker_id, task_cost),
+        );
+        return;
+    }
+
+    pending.attempt += 1;
+    pending.retries_left = pending.retries_left.saturating_sub(1);
+    let next_attempt = pending.attempt;
+    drop(pending);
+
+    let Some(worker) = reserve_worker_load(task_cost) else {
+        PENDING_TASKS.remove(&task_id);
+        _ = requester_socket.emit(
+            "task_result",
+            &json!({
+                "ok": false,
+                "error": "task_retry_no_available_worker",
+                "task_id": task_id,
+                "attempt": next_attempt,
+                "worker_id": old_worker_id,
+                "task_cost": task_cost,
+                "ts": now_ts(),
+            }),
+        );
+        return;
+    };
+
+    let worker_id = worker.node_id.clone();
+    let retry_message = build_worker_task_message(
+        config.distributed.node_id.clone(),
+        worker_id.clone(),
+        task_id.clone(),
+        next_attempt,
+        task_cost,
+        task,
+    );
+
+    if worker.socket.emit("task", &retry_message).is_err() {
+        release_worker_load(&worker_id, task_cost);
+        PENDING_TASKS.remove(&task_id);
+        _ = requester_socket.emit(
+            "task_result",
+            &json!({
+                "ok": false,
+                "error": "task_retry_emit_failed",
+                "task_id": task_id,
+                "attempt": next_attempt,
+                "worker_id": worker_id,
+                "task_cost": task_cost,
+                "ts": now_ts(),
+            }),
+        );
+        return;
+    }
+
+    if let Some(mut refreshed) = PENDING_TASKS.get_mut(&task_id) {
+        if refreshed.attempt == next_attempt {
+            refreshed.worker_id = worker_id;
+        }
+    }
+
+    watch_task_timeout(task_id, next_attempt, timeout_secs);
+}
+
 fn should_master_run_task_locally(task: &Value) -> bool {
     matches!(
         task.get("type")
@@ -419,8 +652,9 @@ fn should_master_run_task_locally(task: &Value) -> bool {
     )
 }
 
-async fn run_task_on_master(task: Value, task_cost: u64) -> Value {
+async fn run_task_on_master(task: Value, task_id: &str, attempt: u64, task_cost: u64) -> Value {
     WORKER_CURRENT_LOAD.fetch_add(task_cost, Ordering::Relaxed);
+    let task = attach_task_metadata(task, task_id, attempt);
     let result = worker_task::run_worker_task(task).await;
     WORKER_CURRENT_LOAD.fetch_sub(task_cost, Ordering::Relaxed);
     result
@@ -462,12 +696,32 @@ async fn dispatch_task(socket: &SocketRef, msg: &Value) {
         return;
     };
 
+    let task_id = task_id_of(msg);
+    if PENDING_TASKS.contains_key(&task_id) {
+        _ = socket.emit(
+            "dispatch_result",
+            &json!({
+                "ok": false,
+                "error": "duplicate_task_id",
+                "task_id": task_id,
+                "ts": now_ts(),
+            }),
+        );
+        return;
+    }
+
     let task_cost = task_cost_of(msg);
+    let attempt = task_attempt_of(msg);
+    let timeout_secs = task_timeout_secs_of(msg);
+    let retries_left = task_retries_of(msg);
+
     if should_master_run_task_locally(&task) {
         _ = socket.emit(
             "dispatch_result",
             &json!({
                 "ok": true,
+                "task_id": task_id,
+                "attempt": attempt,
                 "worker_id": config.distributed.node_id,
                 "task_cost": task_cost,
                 "local_exec": true,
@@ -475,10 +729,12 @@ async fn dispatch_task(socket: &SocketRef, msg: &Value) {
             }),
         );
 
-        let result = run_task_on_master(task, task_cost).await;
+        let result = run_task_on_master(task, &task_id, attempt, task_cost).await;
         _ = socket.emit(
             "task_result",
             &json!({
+                "task_id": task_id,
+                "attempt": attempt,
                 "worker_id": config.distributed.node_id,
                 "task_cost": task_cost,
                 "result": result,
@@ -494,6 +750,8 @@ async fn dispatch_task(socket: &SocketRef, msg: &Value) {
             "dispatch_result",
             &json!({
                 "ok": true,
+                "task_id": task_id,
+                "attempt": attempt,
                 "worker_id": config.distributed.node_id,
                 "task_cost": task_cost,
                 "local_exec": true,
@@ -502,10 +760,12 @@ async fn dispatch_task(socket: &SocketRef, msg: &Value) {
             }),
         );
 
-        let result = run_task_on_master(task, task_cost).await;
+        let result = run_task_on_master(task, &task_id, attempt, task_cost).await;
         _ = socket.emit(
             "task_result",
             &json!({
+                "task_id": task_id,
+                "attempt": attempt,
                 "worker_id": config.distributed.node_id,
                 "task_cost": task_cost,
                 "result": result,
@@ -517,29 +777,121 @@ async fn dispatch_task(socket: &SocketRef, msg: &Value) {
         return;
     };
 
-    _ = worker.socket.emit(
-        "task",
-        &json!({
-            "from": current_node_id(socket).unwrap_or_default(),
-            "worker_id": worker.node_id,
-            "task_cost": task_cost,
-            "task": task,
-            "ts": now_ts(),
-        }),
+    let worker_id = worker.node_id.clone();
+    PENDING_TASKS.insert(
+        task_id.clone(),
+        PendingTask {
+            requester_socket: socket.clone(),
+            task: task.clone(),
+            task_cost,
+            worker_id: worker_id.clone(),
+            attempt,
+            retries_left,
+            timeout_secs,
+        },
     );
+
+    let task_message = build_worker_task_message(
+        current_node_id(socket).unwrap_or_default(),
+        worker_id.clone(),
+        task_id.clone(),
+        attempt,
+        task_cost,
+        task.clone(),
+    );
+    if worker.socket.emit("task", &task_message).is_err() {
+        PENDING_TASKS.remove(&task_id);
+        release_worker_load(&worker_id, task_cost);
+
+        _ = socket.emit(
+            "dispatch_result",
+            &json!({
+                "ok": true,
+                "task_id": task_id,
+                "attempt": attempt,
+                "worker_id": config.distributed.node_id,
+                "task_cost": task_cost,
+                "local_exec": true,
+                "fallback_reason": "worker_emit_failed",
+                "ts": now_ts(),
+            }),
+        );
+
+        let result = run_task_on_master(task, &task_id, attempt, task_cost).await;
+        _ = socket.emit(
+            "task_result",
+            &json!({
+                "task_id": task_id,
+                "attempt": attempt,
+                "worker_id": config.distributed.node_id,
+                "task_cost": task_cost,
+                "result": result,
+                "local_exec": true,
+                "fallback_reason": "worker_emit_failed",
+                "ts": now_ts(),
+            }),
+        );
+        return;
+    }
+
+    watch_task_timeout(task_id.clone(), attempt, timeout_secs);
 
     _ = socket.emit(
         "dispatch_result",
         &json!({
             "ok": true,
-            "worker_id": worker.node_id,
+            "task_id": task_id,
+            "attempt": attempt,
+            "worker_id": worker_id,
             "task_cost": task_cost,
+            "timeout_secs": timeout_secs,
+            "retries_left": retries_left,
             "ts": now_ts(),
         }),
     );
 }
 
 async fn forward_task_result(socket: &SocketRef, msg: &Value) {
+    let worker_id = current_node_id(socket).unwrap_or_default();
+    let task_cost = task_cost_of(msg);
+    release_worker_load(&worker_id, task_cost);
+
+    let task_id = msg
+        .get("task_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    let attempt = task_attempt_of(msg);
+
+    if !task_id.is_empty() {
+        let requester_socket = match PENDING_TASKS.entry(task_id.clone()) {
+            Entry::Occupied(entry) => {
+                if entry.get().attempt != attempt {
+                    return;
+                }
+                let requester_socket = entry.get().requester_socket.clone();
+                entry.remove();
+                requester_socket
+            }
+            Entry::Vacant(_) => {
+                return;
+            }
+        };
+
+        _ = requester_socket.emit(
+            "task_result",
+            &json!({
+                "task_id": task_id,
+                "attempt": attempt,
+                "worker_id": worker_id,
+                "task_cost": task_cost,
+                "result": msg.get("result").cloned().unwrap_or_else(|| json!(null)),
+                "ts": now_ts(),
+            }),
+        );
+        return;
+    }
+
     let Some(master_id) = msg.get("master_id").and_then(|v| v.as_str()) else {
         _ = socket.emit(
             "server_error",
@@ -561,13 +913,10 @@ async fn forward_task_result(socket: &SocketRef, msg: &Value) {
         return;
     };
 
-    let worker_id = current_node_id(socket).unwrap_or_default();
-    let task_cost = task_cost_of(msg);
-    release_worker_load(&worker_id, task_cost);
-
     _ = master.socket.emit(
         "task_result",
         &json!({
+            "attempt": attempt,
             "worker_id": worker_id,
             "task_cost": task_cost,
             "result": msg.get("result").cloned().unwrap_or_else(|| json!(null)),

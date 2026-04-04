@@ -33,6 +33,16 @@
       font-weight: 700;
       margin-bottom: 12px;
     }
+    .stats {
+      display: flex;
+      gap: 24px;
+      margin-bottom: 12px;
+    }
+    .stat-label {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 4px;
+    }
     pre {
       white-space: pre-wrap;
       word-break: break-all;
@@ -48,6 +58,8 @@
     th, td {
       text-align: left;
       padding: 8px;
+      height: 52px;
+      box-sizing: border-box;
       border-bottom: 1px solid #1f2937;
     }
     th {
@@ -66,24 +78,48 @@
       color: #bbf7d0;
       font-size: 12px;
     }
+    .node-role {
+      margin-top: 4px;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    .master-role {
+      color: #f87171;
+      font-weight: 700;
+    }
+    .table-scroll {
+      max-height: 360px;
+      overflow-y: auto;
+    }
   </style>
 </head>
 <body>
   <div class="grid">
     <div class="card">
-      <h2 class="title">已连接 Worker 数量</h2>
-      <div class="value" id="workerCount">0</div>
-      <table>
-        <thead>
-          <tr>
-            <th>节点</th>
-            <th>地址</th>
-            <th>负载</th>
-            <th>心跳时间</th>
-          </tr>
-        </thead>
-        <tbody id="workerRows"></tbody>
-      </table>
+      <h2 class="title">集群节点</h2>
+      <div class="stats">
+        <div>
+          <div class="stat-label">Worker 数量</div>
+          <div class="value" id="workerCount">0</div>
+        </div>
+        <div>
+          <div class="stat-label">全部节点数量</div>
+          <div class="value" id="allNodeCount">0</div>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>节点</th>
+              <th>地址</th>
+              <th>负载</th>
+              <th>心跳时间</th>
+            </tr>
+          </thead>
+          <tbody id="allNodeRows"></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="card">
@@ -122,17 +158,22 @@
 
       document.getElementById("workerCount").textContent =
         data.distributed.worker_count ?? 0;
+      document.getElementById("allNodeCount").textContent =
+        data.distributed.all_nodes?.count ?? 0;
       document.getElementById("playerCount").textContent =
         data.player_count ?? 0;
       document.getElementById("configInfo").textContent =
         JSON.stringify(cfg, null, 2);
 
-      const rows = (data.distributed.workers ?? [])
+      const allRows = (data.distributed.all_nodes?.nodes ?? [])
         .map((node) => `
           <tr class="${node.node_id === selfNode.node_id ? "self-node" : ""}">
             <td>
-              ${node.node_id ?? ""}
-              ${node.node_id === selfNode.node_id ? "<span class=\"badge\">本机</span>" : ""}
+              <div>
+                ${node.node_id ?? ""}
+                ${node.node_id === selfNode.node_id ? "<span class=\"badge\">本机</span>" : ""}
+              </div>
+              <div class="node-role ${node.role === "master" ? "master-role" : ""}">${node.role ?? ""}</div>
             </td>
             <td>${node.addr ?? ""}</td>
             <td>${node.current_load ?? 0}/${node.max_load ?? 0}</td>
@@ -141,8 +182,8 @@
         `)
         .join("");
 
-      document.getElementById("workerRows").innerHTML =
-        rows || "<tr><td colspan=\"4\">暂无 worker 连接</td></tr>";
+      document.getElementById("allNodeRows").innerHTML =
+        allRows || "<tr><td colspan=\"5\">暂无节点</td></tr>";
     }
 
     async function connectDashboard() {

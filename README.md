@@ -1,11 +1,80 @@
 ### 一个简单的分布式后台服务
 
+### 分布式任务流程
+
+- Worker 启动后会主动连接 master 的 `distributed.server_ns`，注册自身 `node_id/node_role/node_addr/max_load`。
+- Worker 会按 `heartbeat_interval_secs` 周期性向 master 发送 `heartbeat`、`report_load`、`list_nodes`。
+- Master 收到 `dispatch_task` 后，优先选择当前负载最低且未超过 `max_load` 的 worker 下发 `task`；如果没有可用 worker，或者任务类型需要 master 本地执行，则直接本机执行。
+- Worker 执行完成后向 master 发 `server_msg { "cmd": "task_result", ... }`，master 按 `task_id/attempt` 找回原始请求方并转发 `task_result`。
+- Master 侧会对远端任务做超时监控，超时后按 `max_retries` 自动重派；重试耗尽返回 `task_timeout`。
+
 ### 玩家数据表
 
 - `player_profiles`: 玩家基础档案，保存昵称、等级、经验、头像、创建/更新时间。
 - `player_wallets`: 玩家货币账户，保存金币、钻石、体力。
 - `player_items`: 玩家背包道具，按 `userid + item_id` 唯一约束聚合数量。
 - `player_mails`: 玩家邮件，支持附件 JSON、已读/未读状态、发信时间。
+- `task_idempotency`: 分布式任务幂等表/集合，按 `task_id` 记录任务执行状态、attempt 和最终结果。
+
+### 分布式任务协议
+
+向 `/server` namespace 发送：
+
+```json
+{
+  "cmd": "dispatch_task",
+  "task_id": "mail-1001",
+  "attempt": 1,
+  "timeout_secs": 5,
+  "max_retries": 2,
+  "task_cost": 10,
+  "task": {
+    "type": "send_mail",
+    "userid": "u1",
+    "title": "hello",
+    "content": "world"
+  }
+}
+```
+
+会先收到派发确认：
+
+```json
+{
+  "ok": true,
+  "task_id": "mail-1001",
+  "attempt": 1,
+  "worker_id": "worker-1",
+  "task_cost": 10,
+  "timeout_secs": 5,
+  "retries_left": 2,
+  "ts": 1710000000
+}
+```
+
+任务完成后收到结果：
+
+```json
+{
+  "task_id": "mail-1001",
+  "attempt": 1,
+  "worker_id": "worker-1",
+  "task_cost": 10,
+  "result": {
+    "ok": true
+  },
+  "ts": 1710000001
+}
+```
+
+### 任务幂等和重试规则
+
+- `task_id` 相同表示同一笔业务任务。建议非幂等写操作都显式传 `task_id`，例如发奖、发邮件、扣道具。
+- Worker 真正执行业务前会先抢占 `task_idempotency` 记录；抢到锁才执行，已完成则直接回放旧结果。
+- 如果同一 `task_id` 正在执行中，后来的重复请求会最多等待 10 秒轮询旧结果；等到则直接回放，等不到返回 `task_running_wait_timeout`。
+- 如果 worker 执行中崩溃，`running` 幂等记录超过 300 秒没更新后，允许新 attempt 接管这条 `task_id` 继续执行。
+- 旧 attempt 的迟到结果会被 master 丢弃，只释放 worker 负载，不会覆盖当前 attempt 的返回。
+- 常见错误码：`duplicate_task_id`、`task_timeout`、`task_retry_no_available_worker`、`task_retry_emit_failed`、`task_running_wait_timeout`、`task_idempotency_state_lost`、`finish_task_idempotency_failed`。
 
 ### Addon DB 用法
 
