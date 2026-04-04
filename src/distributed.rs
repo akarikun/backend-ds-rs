@@ -1,3 +1,4 @@
+use crate::addons_runtime;
 use crate::commons::utils::CONFIG as config;
 use crate::worker_task;
 use dashmap::DashMap;
@@ -194,6 +195,10 @@ fn sync_master_dashboard_from_nodes(all_nodes: Value) {
 fn sync_master_dashboard_from_payload(payload: &Payload) {
     if let Payload::Text(values) = payload {
         if let Some(value) = values.first() {
+            if let Some(addon_scripts) = value.get("addon_scripts") {
+                addons_runtime::sync_addon_scripts_from_master(addon_scripts);
+            }
+
             if let Some(nodes) = value.get("nodes") {
                 if nodes.is_object() {
                     // register_ok: { node_id, ts, nodes: { count, nodes: [...] } }
@@ -1070,6 +1075,7 @@ pub async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value
             "node_id": node_id,
             "ts": now_ts(),
             "nodes": node_snapshot(),
+            "addon_scripts": addons_runtime::addon_scripts_snapshot(),
         }),
     );
 

@@ -12,7 +12,10 @@ type TaskHandler = fn(Value) -> BoxFuture<'static, Value>;
 
 lazy_static::lazy_static! {
     static ref TASK_METHODS: HashMap<&'static str, TaskHandler> = {
-        HashMap::new()
+        let map = HashMap::new();
+        // Rust 版任务注册示例：
+        // map.insert("create_player", create_player_handler as TaskHandler);
+        map
     };
 }
 
@@ -136,12 +139,14 @@ async fn run_worker_task_inner(task: Value) -> Value {
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    if let Some(handler) = TASK_METHODS.get(task_type) {
-        return handler(task).await;
-    }
 
+    // JS addon 优先，同名任务可覆盖 Rust 内置实现；JS 没有时再回退到 Rust。
     if let Some(result) = addons_runtime::run_addon_task(task_type, &task) {
         return result;
+    }
+
+    if let Some(handler) = TASK_METHODS.get(task_type) {
+        return handler(task).await;
     }
 
     json!({
@@ -151,3 +156,80 @@ async fn run_worker_task_inner(task: Value) -> Value {
         "task": task,
     })
 }
+
+/*
+fn create_player_handler(task: Value) -> BoxFuture<'static, Value> {
+    Box::pin(async move {
+        let userid = task
+            .get("userid")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let nickname = task
+            .get("nickname")
+            .and_then(|value| value.as_str())
+            .unwrap_or("player")
+            .to_string();
+
+        if userid.is_empty() {
+            return json!({
+                "ok": false,
+                "type": "create_player",
+                "error": "userid is empty",
+            });
+        }
+
+        let profile_rows = match db::db_query(
+            "insert into player_profiles (userid, nickname, level, exp, avatar_id)
+             values (?, ?, ?, ?, ?)
+             on conflict (userid)
+             do update set nickname = excluded.nickname, updated_at = now()
+             returning *",
+            vec![json!(userid), json!(nickname), json!(1), json!(0), json!(0)],
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                return json!({
+                    "ok": false,
+                    "type": "create_player",
+                    "error": err,
+                });
+            }
+        };
+
+        let wallet_rows = match db::db_query(
+            "insert into player_wallets (userid, gold, diamond, stamina)
+             values (?, ?, ?, ?)
+             on conflict (userid)
+             do update set updated_at = now()
+             returning *",
+            vec![json!(userid), json!(0), json!(0), json!(100)],
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                return json!({
+                    "ok": false,
+                    "type": "create_player",
+                    "error": err,
+                });
+            }
+        };
+
+        json!({
+            "ok": true,
+            "type": "create_player",
+            "player": {
+                "profile": profile_rows.first().cloned().unwrap_or_else(|| json!({})),
+                "wallet": wallet_rows.first().cloned().unwrap_or_else(|| json!({})),
+                "items": [],
+                "mails": [],
+            },
+        })
+    })
+}
+*/

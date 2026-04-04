@@ -1,3 +1,4 @@
+use crate::commons::utils::CONFIG as config;
 use crate::commons::db;
 use crate::commons::redis;
 use boa_engine::js_string;
@@ -5,19 +6,21 @@ use boa_engine::native_function::NativeFunction;
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsValue, Source};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
+use std::sync::RwLock;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AddonScript {
     path: String,
     source: String,
 }
 
 lazy_static::lazy_static! {
-    static ref ADDON_SCRIPTS: Vec<AddonScript> = load_addon_scripts();
+    static ref ADDON_SCRIPTS: RwLock<Vec<AddonScript>> = RwLock::new(Vec::new());
 }
 
 const ADDON_BOOTSTRAP: &str = r#"
@@ -39,22 +42,52 @@ globalThis.console = {
 "#;
 
 pub fn init_addons() {
-    if ADDON_SCRIPTS.is_empty() {
-        dbg!("addons_disabled", "addons directory missing or no js files");
+    if config.distributed.node_role == "worker" {
+        dbg!("addons_waiting_master_sync", &config.distributed.node_id);
         return;
     }
 
-    dbg!(
-        "addons_loaded",
-        ADDON_SCRIPTS
-            .iter()
-            .map(|script| script.path.as_str())
-            .collect::<Vec<_>>()
-    );
+    let scripts = load_addon_scripts();
+    replace_addon_scripts(scripts);
+}
+
+pub fn addon_scripts_snapshot() -> Value {
+    let scripts = addon_scripts();
+    json!(scripts)
+}
+
+pub fn sync_addon_scripts_from_master(value: &Value) {
+    let scripts = serde_json::from_value::<Vec<AddonScript>>(value.clone()).unwrap_or_default();
+    replace_addon_scripts(scripts);
+}
+
+fn replace_addon_scripts(scripts: Vec<AddonScript>) {
+    if scripts.is_empty() {
+        dbg!("addons_disabled", "addons directory missing or no js files");
+    } else {
+        dbg!(
+            "addons_loaded",
+            scripts
+                .iter()
+                .map(|script| script.path.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    if let Ok(mut addon_scripts) = ADDON_SCRIPTS.write() {
+        *addon_scripts = scripts;
+    }
+}
+
+fn addon_scripts() -> Vec<AddonScript> {
+    ADDON_SCRIPTS
+        .read()
+        .map(|scripts| scripts.clone())
+        .unwrap_or_default()
 }
 
 pub fn has_addons() -> bool {
-    !ADDON_SCRIPTS.is_empty()
+    !addon_scripts().is_empty()
 }
 
 pub fn run_addon_task(task_type: &str, task: &Value) -> Option<Value> {
@@ -62,7 +95,7 @@ pub fn run_addon_task(task_type: &str, task: &Value) -> Option<Value> {
         return None;
     }
 
-    for script in ADDON_SCRIPTS.iter() {
+    for script in addon_scripts().iter() {
         match run_script_task(script, task_type, task) {
             Ok(Some(result)) => return Some(result),
             Ok(None) => {}

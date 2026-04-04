@@ -118,6 +118,22 @@ await cache.set(`player:${userid}`, player, 300);
 await cache.del(`player:${userid}`);
 ```
 
+### 任务实现优先级：JS 覆盖 Rust
+
+只需要在Master中部署addons/*.js，Worker同步时会将JS代码同步并加载到内存中
+
+同一个任务类型会优先执行 `addons/*.js` 里的 JS handler；如果 JS 没有实现这个任务，才会回退到 Rust 内置 handler。
+
+也就是说，如果你后面在 Rust 里实现了 `create_player`，但某些场景想临时调整逻辑，只要在 addon JS 里写一个同名的 `query("create_player", ...)`，就能覆盖 Rust 版本；删除这个 JS handler 后，又会自动回退到 Rust 版本。
+
+Rust 任务注册格式在 `src/worker_task.rs` 的 `TASK_METHODS` 里，例如：
+
+```rust
+// map.insert("create_player", create_player_handler as TaskHandler);
+```
+
+Rust 版 `create_player_handler` 的 demo 也已经注释写在 `src/worker_task.rs` 末尾，可以直接按那个格式扩展自己的任务。
+
 ### 配置 具体可参考config.rs备注
 ```
 {
