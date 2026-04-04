@@ -1,14 +1,15 @@
 ### 一个简单的分布式后台服务
 
-- 推荐部署顺序：运行当前程序会在当前目录添加`config.json`配置，然后退出程序，如果是 PostgreSQL 空库，先调用一次 `cargo test test_init_postgresql_schema --lib -- --nocapture
-` 初始化表结构，更新`config.json`配置后，运行当前程序。
+##### 使用`Salvo` + `Socket.IO`
+
+- 推荐部署顺序：运行当前程序会在当前目录添加 `config.json` 配置，然后退出程序；如果是 PostgreSQL 空库，先调用一次 `cargo test test_init_postgresql_schema --lib -- --nocapture` 初始化表结构，更新 `config.json` 配置后，再运行当前程序。
 - 当前架构边界：建议按单 master + 多 worker 使用，暂时不要直接扩成多 master，避免 addon 同步和调度一致性变复杂。
 - `task_idempotency` 现在不会自动清理，长期运行后表数据会持续增长，后面可以按保留天数加一个定期清理策略。
 - addon JS 同步规则：worker 连接 master 时会同步 master 的脚本；如果 master 上更新了 `addons/*.js`，需要 master 重启或 worker 重连后 worker 才会拿到新版本。
 - 正式部署前建议做一次完整联调：master、worker、PostgreSQL/MongoDB、Redis、玩家创建/查询、发奖、邮件、幂等重试、dashboard 页面展示都跑一遍。
 
 
-### 配置 具体可参考config.rs备注
+### config.json配置 具体可参考config.rs备注
 ```
 {
   "host": "0.0.0.0:8082",
@@ -16,7 +17,7 @@
   "dashboard_ns": "/api/dashboard",
   "aes_passphrase": "V0.0.1-A265",
   "db": {
-    "kind": "mongodb",
+    "kind": "postgresql",
     "mongodb_uri": "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds",
     "mongodb_db": "backend_ds",
     "postgresql_url": "postgresql://postgres:postgres@127.0.0.1:5432/backend_ds"
@@ -133,7 +134,7 @@ http://0.0.0.0:8082/addon-test.html
 
 同一个任务类型会优先执行 `addons/*.js` 里的 JS handler；如果 JS 没有实现这个任务，才会回退到 Rust 内置 handler。
 
-也就是说，如果你后面在 Rust 里实现了 `create_player`，但某些场景想临时调整逻辑，只要在 addon JS 里写一个同名的 `query("create_player", ...)`，就能覆盖 Rust 版本；删除这个 JS handler 后，又会自动回退到 Rust 版本。
+也就是说，如果你后面在 Rust 里实现了 `create_player`，但某些场景想临时调整逻辑，只要在 addon JS 里写一个同名的 `$register_task("create_player", ...)`，就能覆盖 Rust 版本；删除这个 JS handler 后，又会自动回退到 Rust 版本。
 
 Rust 任务注册格式在 `src/worker_task.rs` 的 `TASK_METHODS` 里，例如：
 
@@ -146,16 +147,20 @@ Rust 版 `create_player_handler` 的 demo 也已经注释写在 `src/worker_task
 ### Addon DB 用法
 
 ```js
-query("get_player", async (db, data) => {
-  let rows = await db.query(
+// PG 这类 SQL：db.db_query(...) / db.db_transaction(...)
+// Mongo 这类文档库：db.doc_query(...)
+
+$register_task("get_player", async (db, data) => {
+  let rows = await db.db_query(
     "select * from player_profiles where userid = ?",
     [data.userid || ""]
   );
   return rows[0] || null;
 });
 
-query("create_player", async (db, data) => {
-  let rows = await db.query(
+// 单条 SQL 版
+$register_task("create_player", async (db, data) => {
+  let rows = await db.db_query(
     `insert into player_profiles (userid, nickname)
      values (?, ?)
      on conflict (userid)
@@ -165,14 +170,87 @@ query("create_player", async (db, data) => {
   );
   return rows[0] || null;
 });
+
+// 事务版，推荐多表写入时用这种；和上面的单条 SQL 版二选一，不要重复注册同名任务。
+$register_task("create_player", async (db, data) => {
+  let result = await db.db_transaction([
+    {
+      query: `insert into player_profiles (userid, nickname)
+              values (?, ?)
+              on conflict (userid)
+              do update set nickname = excluded.nickname, updated_at = now()
+              returning *`,
+      params: [data.userid || "", data.nickname || "player"],
+    },
+    {
+      query: `insert into player_wallets (userid, gold, diamond, stamina)
+              values (?, ?, ?, ?)
+              on conflict (userid)
+              do update set updated_at = now()
+              returning *`,
+      params: [data.userid || "", 0, 0, 100],
+    },
+  ]);
+  if (result.ok === false) {
+    return result;
+  }
+  return {
+    profile: (result[0] || [])[0] || null,
+    wallet: (result[1] || [])[0] || null,
+  };
+});
+
+// Mongo 示例，没有特意测试，目前以 PG 为主。
+$register_task("get_player_profile", async (db, data) => {
+  let rows = await db.doc_query("player_profiles", {
+    op: "find_one",
+    filter: {
+      userid: data.userid || "",
+    },
+  });
+  return rows[0] || null;
+});
+
+$register_task("create_player_profile", async (db, data) => {
+  let inserted = await db.doc_query("player_profiles", {
+    op: "insert_one",
+    document: {
+      userid: data.userid || "",
+      nickname: data.nickname || "player",
+      level: 1,
+      exp: 0,
+      avatar_id: 0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    },
+  });
+  return inserted[0] || null;
+});
+
+$register_task("rename_player_profile", async (db, data) => {
+  let updated = await db.doc_query("player_profiles", {
+    op: "update_one",
+    filter: {
+      userid: data.userid || "",
+    },
+    update: {
+      $set: {
+        nickname: data.nickname || "player",
+        updated_at: Date.now(),
+      },
+    },
+    upsert: true,
+  });
+  return updated[0] || null;
+});
 ```
 
 ### Addon Redis 缓存用法
 
-Rust 侧会把 `cache.get/cache.set/cache.del` 注入 addon JS。当前 `addons/connector.js` 先对 `get_player` 做了一个简单的玩家快照缓存，写操作后会强制回源并刷新缓存。
+Rust 侧会把 `$cache.get/$cache.set/$cache.del` 注入 addon JS。当前 `addons/connector.js` 先对 `get_player` 做了一个简单的玩家快照缓存，写操作后会强制回源并刷新缓存。
 
 ```js
-let player = await cache.get(`player:${userid}`);
-await cache.set(`player:${userid}`, player, 300);
-await cache.del(`player:${userid}`);
+let player = await $cache.get(`player:${userid}`);
+await $cache.set(`player:${userid}`, player, 300);
+await $cache.del(`player:${userid}`);
 ```

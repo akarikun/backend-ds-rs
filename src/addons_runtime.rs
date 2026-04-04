@@ -1,6 +1,6 @@
-use crate::commons::utils::CONFIG as config;
 use crate::commons::db;
 use crate::commons::redis;
+use crate::commons::utils::CONFIG as config;
 use boa_engine::js_string;
 use boa_engine::native_function::NativeFunction;
 use boa_engine::object::builtins::JsPromise;
@@ -25,13 +25,15 @@ lazy_static::lazy_static! {
 
 const ADDON_BOOTSTRAP: &str = r#"
 globalThis.__addonHandlers = {};
-globalThis.query = (name, handler) => {
+globalThis.$register_task = (name, handler) => {
   globalThis.__addonHandlers[name] = handler;
 };
 globalThis.db = {
-  query: (sql, params) => __db_query(sql, params || []),
+  db_query: (sql, params) => __db_query(sql, params || []),
+  db_transaction: (queries) => __db_transaction(queries || []),
+  doc_query: (collection, command) => __db_doc_query(collection, command || {}),
 };
-globalThis.cache = {
+globalThis.$cache = {
   get: (key) => __cache_get(key),
   set: (key, value, ttlSecs) => __cache_set(key, value, ttlSecs),
   del: (key) => __cache_del(key),
@@ -195,6 +197,20 @@ fn register_db_functions(context: &mut Context) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     context
         .register_global_builtin_callable(
+            js_string!("__db_transaction"),
+            1,
+            NativeFunction::from_fn_ptr(js_db_transaction),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .register_global_builtin_callable(
+            js_string!("__db_doc_query"),
+            2,
+            NativeFunction::from_fn_ptr(js_db_doc_query),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .register_global_builtin_callable(
             js_string!("__cache_get"),
             1,
             NativeFunction::from_fn_ptr(js_cache_get),
@@ -225,7 +241,7 @@ fn register_db_functions(context: &mut Context) -> Result<(), String> {
         .register_global_property(js_string!("db"), JsValue::null(), Attribute::all())
         .map_err(|err| err.to_string())?;
     context
-        .register_global_property(js_string!("cache"), JsValue::null(), Attribute::all())
+        .register_global_property(js_string!("$cache"), JsValue::null(), Attribute::all())
         .map_err(|err| err.to_string())
 }
 
@@ -240,6 +256,51 @@ fn js_db_query(
         .unwrap_or_default();
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(db::db_query(sql.as_str(), params))
+    });
+
+    let value = match result {
+        Ok(rows) => json!(rows),
+        Err(err) => json!({
+            "ok": false,
+            "error": err,
+        }),
+    };
+
+    Ok(json_to_js_value(value, context))
+}
+
+fn js_db_doc_query(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let collection = js_arg_to_string(args.first(), context);
+    let command = js_arg_to_json(args.get(1), context).unwrap_or_else(|| json!({}));
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(db::db_doc_query(collection.as_str(), command))
+    });
+
+    let value = match result {
+        Ok(rows) => json!(rows),
+        Err(err) => json!({
+            "ok": false,
+            "error": err,
+        }),
+    };
+
+    Ok(json_to_js_value(value, context))
+}
+
+fn js_db_transaction(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let queries = js_arg_to_json(args.first(), context)
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(db::db_transaction(queries))
     });
 
     let value = match result {
@@ -285,11 +346,7 @@ fn js_cache_set(
     let value = js_arg_to_json(args.get(1), context).unwrap_or(Value::Null);
     let ttl_secs = js_arg_to_json(args.get(2), context).and_then(|value| value.as_u64());
     let result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(redis::redis_set(
-            key.as_str(),
-            &value,
-            ttl_secs,
-        ))
+        tokio::runtime::Handle::current().block_on(redis::redis_set(key.as_str(), &value, ttl_secs))
     });
 
     match result {
@@ -325,7 +382,6 @@ fn js_cache_del(
         )),
     }
 }
-
 
 fn js_arg_to_string(value: Option<&JsValue>, context: &mut Context) -> String {
     value

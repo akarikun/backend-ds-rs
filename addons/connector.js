@@ -26,7 +26,7 @@ function playerCacheKey(userid) {
 
 async function loadPlayer(db, userid, reloadCache) {
   if (!reloadCache) {
-    let cachedPlayer = await cache.get(playerCacheKey(userid));
+    let cachedPlayer = await $cache.get(playerCacheKey(userid));
     if (cachedPlayer && !isDbError(cachedPlayer)) {
       return {
         ...cachedPlayer,
@@ -35,7 +35,7 @@ async function loadPlayer(db, userid, reloadCache) {
     }
   }
 
-  let profiles = await db.query(
+  let profiles = await db.db_query(
     "select * from player_profiles where userid = ?",
     [userid]
   );
@@ -44,25 +44,25 @@ async function loadPlayer(db, userid, reloadCache) {
   }
   let profile = profiles[0];
   if (!profile) {
-    await cache.del(playerCacheKey(userid));
+    await $cache.del(playerCacheKey(userid));
     return null;
   }
 
-  let wallets = await db.query(
+  let wallets = await db.db_query(
     "select * from player_wallets where userid = ?",
     [userid]
   );
   if (isDbError(wallets)) {
     return wallets;
   }
-  let items = await db.query(
+  let items = await db.db_query(
     "select * from player_items where userid = ? order by id asc",
     [userid]
   );
   if (isDbError(items)) {
     return items;
   }
-  let mails = await db.query(
+  let mails = await db.db_query(
     "select * from player_mails where userid = ? order by id desc",
     [userid]
   );
@@ -82,7 +82,7 @@ async function loadPlayer(db, userid, reloadCache) {
     items,
     mails,
   };
-  await cache.set(playerCacheKey(userid), player);
+  await $cache.set(playerCacheKey(userid), player);
   return player;
 }
 
@@ -166,7 +166,7 @@ async function changeCurrency(db, userid, currency, delta, type) {
     };
   }
 
-  let updated = await db.query(
+  let updated = await db.db_query(
     `update player_wallets
      set ${currency} = ?, updated_at = now()
      where userid = ?
@@ -203,7 +203,7 @@ async function changeItem(db, userid, itemId, delta, type) {
     return checked;
   }
 
-  let rows = await db.query(
+  let rows = await db.db_query(
     "select * from player_items where userid = ? and item_id = ?",
     [userid, itemId]
   );
@@ -226,7 +226,7 @@ async function changeItem(db, userid, itemId, delta, type) {
   }
 
   if (item) {
-    let updated = await db.query(
+    let updated = await db.db_query(
       `update player_items
        set item_count = ?, updated_at = now()
        where userid = ? and item_id = ?
@@ -241,7 +241,7 @@ async function changeItem(db, userid, itemId, delta, type) {
       };
     }
   } else if (nextCount > 0) {
-    let inserted = await db.query(
+    let inserted = await db.db_query(
       `insert into player_items (userid, item_id, item_count)
        values (?, ?, ?)
        returning *`,
@@ -268,7 +268,7 @@ async function changeItem(db, userid, itemId, delta, type) {
   };
 }
 
-query("create_player", async (db, data) => {
+$register_task("create_player", async (db, data) => {
   let userid = data.userid || "";
   let nickname = data.nickname || "player";
   if (!userid) {
@@ -295,37 +295,34 @@ query("create_player", async (db, data) => {
     };
   }
 
-  let profile = await db.query(
-    `insert into player_profiles (userid, nickname, level, exp, avatar_id)
-     values (?, ?, ?, ?, ?)
-     on conflict (userid)
-     do update set nickname = excluded.nickname, updated_at = now()
-     returning *`,
-    [userid, nickname, 1, 0, 0]
-  );
-  if (profile && profile.ok === false) {
+  let txResult = await db.db_transaction([
+    {
+      query: `insert into player_profiles (userid, nickname, level, exp, avatar_id)
+              values (?, ?, ?, ?, ?)
+              on conflict (userid)
+              do update set nickname = excluded.nickname, updated_at = now()
+              returning *`,
+      params: [userid, nickname, 1, 0, 0],
+    },
+    {
+      query: `insert into player_wallets (userid, gold, diamond, stamina)
+              values (?, ?, ?, ?)
+              on conflict (userid)
+              do update set updated_at = now()
+              returning *`,
+      params: [userid, 0, 0, 100],
+    },
+  ]);
+  if (isDbError(txResult)) {
     return {
       ok: false,
       type: "create_player",
-      error: profile.error || "create profile failed",
+      error: txResult.error || "create player failed",
     };
   }
 
-  let wallet = await db.query(
-    `insert into player_wallets (userid, gold, diamond, stamina)
-     values (?, ?, ?, ?)
-     on conflict (userid)
-     do update set updated_at = now()
-     returning *`,
-    [userid, 0, 0, 100]
-  );
-  if (wallet && wallet.ok === false) {
-    return {
-      ok: false,
-      type: "create_player",
-      error: wallet.error || "create wallet failed",
-    };
-  }
+  let profile = txResult[0] || [];
+  let wallet = txResult[1] || [];
 
   let reloadPlayer = await loadPlayer(db, userid, true);
 
@@ -342,7 +339,7 @@ query("create_player", async (db, data) => {
   };
 });
 
-query("get_player", async (db, data) => {
+$register_task("get_player", async (db, data) => {
   let userid = data.userid || "";
   if (!userid) {
     return {
@@ -375,7 +372,7 @@ query("get_player", async (db, data) => {
   };
 });
 
-query("add_currency", async (db, data) => {
+$register_task("add_currency", async (db, data) => {
   return await changeCurrency(
     db,
     data.userid || "",
@@ -385,7 +382,7 @@ query("add_currency", async (db, data) => {
   );
 });
 
-query("add_item", async (db, data) => {
+$register_task("add_item", async (db, data) => {
   return await changeItem(
     db,
     data.userid || "",
@@ -395,14 +392,14 @@ query("add_item", async (db, data) => {
   );
 });
 
-query("send_mail", async (db, data) => {
+$register_task("send_mail", async (db, data) => {
   let userid = data.userid || "";
   let checked = await ensurePlayer(db, userid, "send_mail");
   if (!checked.ok) {
     return checked;
   }
 
-  let mail = await db.query(
+  let mail = await db.db_query(
     `insert into player_mails (userid, title, content, attachments, status)
      values (?, ?, ?, ?, ?)
      returning *`,
@@ -430,7 +427,7 @@ query("send_mail", async (db, data) => {
   };
 });
 
-query("claim_mail", async (db, data) => {
+$register_task("claim_mail", async (db, data) => {
   let userid = data.userid || "";
   let checked = await ensurePlayer(db, userid, "claim_mail");
   if (!checked.ok) {
@@ -438,7 +435,7 @@ query("claim_mail", async (db, data) => {
   }
 
   let mailId = mailQueryOf(userid, data.mail_id);
-  let mailRows = await db.query(
+  let mailRows = await db.db_query(
     "select * from player_mails where id = ? and userid = ?",
     [mailId, userid]
   );
@@ -474,7 +471,7 @@ query("claim_mail", async (db, data) => {
     }
   }
 
-  let updated = await db.query(
+  let updated = await db.db_query(
     `update player_mails
      set status = ?
      where id = ? and userid = ?

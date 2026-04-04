@@ -3,11 +3,12 @@ use crate::commons::utils::CONFIG as config;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
+use tokio::sync::Mutex;
 use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::{Client, GenericClient, NoTls, Row};
 
 pub struct PgDb {
-    client: Client,
+    client: Mutex<Client>,
 }
 
 impl PgDb {
@@ -22,26 +23,50 @@ impl PgDb {
             }
         });
 
-        Ok(Self { client })
+        Ok(Self {
+            client: Mutex::new(client),
+        })
     }
 }
 
 #[async_trait]
 impl DbDriver for PgDb {
     async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Value>, String> {
-        let sql = normalize_sql_placeholders(sql);
-        let values = params.into_iter().map(pg_param_value).collect::<Vec<_>>();
-        let refs = values
-            .iter()
-            .map(|value| value.as_ref() as &(dyn ToSql + Sync))
-            .collect::<Vec<_>>();
+        let client = self.client.lock().await;
+        pg_query_rows(&*client, sql, params).await
+    }
 
-        let rows = self
-            .client
-            .query(sql.as_str(), refs.as_slice())
-            .await
-            .map_err(|err| err.to_string())?;
-        Ok(rows.iter().map(pg_row_to_json).collect())
+    async fn transaction(&self, queries: Vec<Value>) -> Result<Vec<Value>, String> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(|err| err.to_string())?;
+        let mut results = Vec::with_capacity(queries.len());
+
+        for query in queries.iter() {
+            let sql = query
+                .get("query")
+                .or_else(|| query.get("sql"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            if sql.is_empty() {
+                return Err("transaction query sql is empty".to_string());
+            }
+
+            let params = query
+                .get("params")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let rows = pg_query_rows(&tx, sql, params).await?;
+            results.push(Value::Array(rows));
+        }
+
+        tx.commit().await.map_err(|err| err.to_string())?;
+        Ok(results)
+    }
+
+    async fn doc_query(&self, _collection: &str, _command: Value) -> Result<Vec<Value>, String> {
+        Err("db.doc_query only supports mongodb, use db.db_query for sql databases".to_string())
     }
 
     async fn try_begin_task(
@@ -51,8 +76,8 @@ impl DbDriver for PgDb {
         attempt: u64,
     ) -> Result<Option<Value>, String> {
         let attempt = attempt as i64;
-        let inserted = self
-            .client
+        let client = self.client.lock().await;
+        let inserted = client
             .execute(
                 "insert into task_idempotency (task_id, task_type, status, attempt)
                  values ($1, $2, 'running', $3)
@@ -68,8 +93,7 @@ impl DbDriver for PgDb {
         let stale_before = SystemTime::now()
             .checked_sub(Duration::from_secs(TASK_RUNNING_STALE_SECS))
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let reclaimed = self
-            .client
+        let reclaimed = client
             .execute(
                 "update task_idempotency
                  set task_type = $2,
@@ -89,8 +113,7 @@ impl DbDriver for PgDb {
             return Ok(None);
         }
 
-        let row = self
-            .client
+        let row = client
             .query_one(
                 "select status, result from task_idempotency where task_id = $1",
                 &[&task_id],
@@ -107,7 +130,8 @@ impl DbDriver for PgDb {
     }
 
     async fn finish_task(&self, task_id: &str, result: &Value) -> Result<(), String> {
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute(
                 "update task_idempotency
                  set status = 'done', result = $2, updated_at = now()
@@ -118,6 +142,25 @@ impl DbDriver for PgDb {
             .map_err(|err| err.to_string())?;
         Ok(())
     }
+}
+
+async fn pg_query_rows(
+    client: &(impl GenericClient + Sync),
+    sql: &str,
+    params: Vec<Value>,
+) -> Result<Vec<Value>, String> {
+    let sql = normalize_sql_placeholders(sql);
+    let values = params.into_iter().map(pg_param_value).collect::<Vec<_>>();
+    let refs = values
+        .iter()
+        .map(|value| value.as_ref() as &(dyn ToSql + Sync))
+        .collect::<Vec<_>>();
+
+    let rows = client
+        .query(sql.as_str(), refs.as_slice())
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(rows.iter().map(pg_row_to_json).collect())
 }
 
 fn normalize_sql_placeholders(sql: &str) -> String {

@@ -13,6 +13,8 @@ pub(super) const TASK_RUNNING_STALE_SECS: u64 = 300;
 #[async_trait]
 trait DbDriver: Send + Sync {
     async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Value>, String>;
+    async fn transaction(&self, queries: Vec<Value>) -> Result<Vec<Value>, String>;
+    async fn doc_query(&self, collection: &str, command: Value) -> Result<Vec<Value>, String>;
     async fn try_begin_task(
         &self,
         task_id: &str,
@@ -43,6 +45,20 @@ pub async fn db_query(sql: &str, params: Vec<Value>) -> Result<Vec<Value>, Strin
         .get()
         .ok_or_else(|| "db not initialized".to_string())?;
     conn.query(sql, params).await
+}
+
+pub async fn db_doc_query(collection: &str, command: Value) -> Result<Vec<Value>, String> {
+    let conn = DB_CONN
+        .get()
+        .ok_or_else(|| "db not initialized".to_string())?;
+    conn.doc_query(collection, command).await
+}
+
+pub async fn db_transaction(queries: Vec<Value>) -> Result<Vec<Value>, String> {
+    let conn = DB_CONN
+        .get()
+        .ok_or_else(|| "db not initialized".to_string())?;
+    conn.transaction(queries).await
 }
 
 pub async fn try_begin_task(

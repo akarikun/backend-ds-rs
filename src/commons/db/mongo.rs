@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::{Client, Database};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub struct MongoDb {
     db: Database,
@@ -26,7 +26,98 @@ impl MongoDb {
 #[async_trait]
 impl DbDriver for MongoDb {
     async fn query(&self, _sql: &str, _params: Vec<Value>) -> Result<Vec<Value>, String> {
-        Err("db.query only supports postgresql".to_string())
+        Err("db.db_query only supports sql databases, use db.doc_query for mongodb in future addons".to_string())
+    }
+
+    async fn transaction(&self, _queries: Vec<Value>) -> Result<Vec<Value>, String> {
+        Err("db.db_transaction only supports sql databases, use mongodb document transaction extension later".to_string())
+    }
+
+    async fn doc_query(&self, collection: &str, command: Value) -> Result<Vec<Value>, String> {
+        let collection = collection.trim();
+        if collection.is_empty() {
+            return Err("collection is empty".to_string());
+        }
+
+        let command_name = command
+            .get("op")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let docs = self.db.collection::<Document>(collection);
+
+        match command_name {
+            "find_one" => {
+                let filter = command_doc(&command, "filter")?.unwrap_or_default();
+                let mut action = docs.find_one(filter);
+                if let Some(sort) = command_doc(&command, "sort")? {
+                    action = action.sort(sort);
+                }
+
+                let doc = action.await.map_err(|err| err.to_string())?;
+                Ok(doc
+                    .map(mongo_doc_to_json)
+                    .map(|value| vec![value])
+                    .unwrap_or_default())
+            }
+            "find" => {
+                let filter = command_doc(&command, "filter")?.unwrap_or_default();
+                let mut action = docs.find(filter);
+                if let Some(sort) = command_doc(&command, "sort")? {
+                    action = action.sort(sort);
+                }
+                if let Some(limit) = command.get("limit").and_then(|value| value.as_i64()) {
+                    if limit > 0 {
+                        action = action.limit(limit);
+                    }
+                }
+
+                let mut cursor = action.await.map_err(|err| err.to_string())?;
+                let mut rows = Vec::new();
+                while let Some(doc) = cursor.try_next().await.map_err(|err| err.to_string())? {
+                    rows.push(mongo_doc_to_json(doc));
+                }
+                Ok(rows)
+            }
+            "insert_one" => {
+                let document = command_doc(&command, "document")?
+                    .ok_or_else(|| "document is required".to_string())?;
+                let result = docs
+                    .insert_one(document)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                Ok(vec![json!({
+                    "inserted_id": mongo_bson_to_json(result.inserted_id),
+                })])
+            }
+            "update_one" => {
+                let filter = command_doc(&command, "filter")?.unwrap_or_default();
+                let update = command_doc(&command, "update")?
+                    .ok_or_else(|| "update is required".to_string())?;
+                let mut action = docs.update_one(filter, update);
+                if let Some(upsert) = command.get("upsert").and_then(|value| value.as_bool()) {
+                    action = action.upsert(upsert);
+                }
+
+                let result = action.await.map_err(|err| err.to_string())?;
+                Ok(vec![json!({
+                    "matched_count": result.matched_count,
+                    "modified_count": result.modified_count,
+                    "upserted_id": result.upserted_id.map(mongo_bson_to_json),
+                })])
+            }
+            "delete_one" => {
+                let filter = command_doc(&command, "filter")?.unwrap_or_default();
+                let result = docs
+                    .delete_one(filter)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                Ok(vec![json!({
+                    "deleted_count": result.deleted_count,
+                })])
+            }
+            _ => Err(format!("unsupported doc op: {command_name}")),
+        }
     }
 
     async fn try_begin_task(
@@ -122,6 +213,26 @@ impl DbDriver for MongoDb {
             .map_err(|err| err.to_string())?;
         Ok(())
     }
+}
+
+fn command_doc(command: &Value, key: &str) -> Result<Option<Document>, String> {
+    let Some(value) = command.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    mongodb::bson::to_document(value)
+        .map(Some)
+        .map_err(|err| format!("{key} must be an object: {err}"))
+}
+
+fn mongo_doc_to_json(doc: Document) -> Value {
+    mongo_bson_to_json(Bson::Document(doc))
+}
+
+fn mongo_bson_to_json(value: Bson) -> Value {
+    mongodb::bson::from_bson::<Value>(value).unwrap_or(Value::Null)
 }
 
 async fn migrate_legacy_players(db: &Database) -> Result<(), String> {
