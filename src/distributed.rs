@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use socketioxide::SocketIo;
 use socketioxide::extract::{Data, SocketRef};
 use socketioxide::socket::DisconnectReason;
+use std::fs;
+use std::sync::LazyLock;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +21,7 @@ struct ServerNode {
     node_id: String,
     addr: String,
     role: String,
+    device_info: Value,
     socket: SocketRef,
     current_load: u64,
     max_load: u64,
@@ -42,6 +45,16 @@ lazy_static::lazy_static! {
     static ref MASTER_DASHBOARD: RwLock<Value> = RwLock::new(empty_dashboard_snapshot());
     static ref WORKER_CURRENT_LOAD: AtomicU64 = AtomicU64::new(0);
     static ref MASTER_TASK_SEQ: AtomicU64 = AtomicU64::new(1);
+}
+
+static CURRENT_NODE_DEVICE_INFO: LazyLock<Value> = LazyLock::new(build_current_node_device_info);
+
+pub fn current_node_device_info() -> Value {
+    let mut device_info = CURRENT_NODE_DEVICE_INFO.clone();
+    let (used_memory_kb, memory_used_ratio) = memory_usage();
+    device_info["used_memory_kb"] = json!(used_memory_kb);
+    device_info["memory_used_ratio"] = json!(memory_used_ratio);
+    device_info
 }
 
 pub fn start_worker_client() {
@@ -217,6 +230,7 @@ fn worker_auth_payload() -> Value {
         "node_id": config.distributed.node_id,
         "addr": config.distributed.node_addr,
         "role": config.distributed.node_role,
+        "device_info": current_node_device_info(),
         "current_load": 0,
         "max_load": config.distributed.max_load,
     })
@@ -332,7 +346,7 @@ async fn run_worker_heartbeat(client: Client) {
 fn node_snapshot() -> Value {
     prune_expired_nodes();
 
-    let nodes = SERVER_NODES
+    let mut nodes = SERVER_NODES
         .iter()
         .map(|entry| {
             let node = entry.value();
@@ -340,12 +354,32 @@ fn node_snapshot() -> Value {
                 "node_id": node.node_id,
                 "addr": node.addr,
                 "role": node.role,
+                "device_info": node.device_info,
                 "current_load": node.current_load,
                 "max_load": node.max_load,
                 "last_heartbeat": node.last_heartbeat,
             })
         })
         .collect::<Vec<_>>();
+
+    let self_node_id = config.distributed.node_id.clone();
+    if !nodes.iter().any(|node| {
+        node.get("node_id").and_then(|value| value.as_str()) == Some(self_node_id.as_str())
+    }) {
+        nodes.push(json!({
+            "node_id": self_node_id,
+            "addr": config.distributed.node_addr,
+            "role": config.distributed.node_role,
+            "device_info": current_node_device_info(),
+            "current_load": if config.distributed.node_role == "worker" {
+                WORKER_CURRENT_LOAD.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            "max_load": config.distributed.max_load,
+            "last_heartbeat": now_ts(),
+        }));
+    }
 
     json!({
         "count": nodes.len(),
@@ -365,6 +399,7 @@ pub fn dashboard_snapshot() -> Value {
             "node_id": self_node_id,
             "addr": config.distributed.node_addr,
             "role": config.distributed.node_role,
+            "device_info": current_node_device_info(),
             "current_load": WORKER_CURRENT_LOAD.load(Ordering::Relaxed),
             "max_load": config.distributed.max_load,
             "last_heartbeat": now_ts(),
@@ -387,25 +422,7 @@ pub fn dashboard_snapshot() -> Value {
 
     prune_expired_nodes();
 
-    let self_node_id = config.distributed.node_id.clone();
-    let self_node = json!({
-        "node_id": self_node_id,
-        "addr": config.distributed.node_addr,
-        "role": config.distributed.node_role,
-        "current_load": 0,
-        "max_load": config.distributed.max_load,
-        "last_heartbeat": now_ts(),
-    });
-
-    let mut all_nodes = node_snapshot();
-    if let Some(nodes) = all_nodes.get_mut("nodes").and_then(|value| value.as_array_mut()) {
-        if !nodes.iter().any(|node| {
-            node.get("node_id").and_then(|value| value.as_str()) == Some(&self_node_id)
-        }) {
-            nodes.push(self_node);
-        }
-        all_nodes["count"] = json!(nodes.len());
-    }
+    let all_nodes = node_snapshot();
 
     let workers = all_nodes
         .get("nodes")
@@ -1013,6 +1030,7 @@ pub async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value
             .and_then(|v| v.as_str())
             .unwrap_or("worker")
             .to_string(),
+        device_info: data.get("device_info").cloned().unwrap_or_else(|| json!({})),
         socket: socket.clone(),
         current_load: data
             .get("current_load")
@@ -1067,4 +1085,62 @@ pub async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value
             }
         },
     );
+}
+
+fn build_current_node_device_info() -> Value {
+    json!({
+        "hostname": hostname(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "cpu_cores": std::thread::available_parallelism()
+            .map(|num| num.get())
+            .unwrap_or(1),
+        "total_memory_kb": total_memory_kb(),
+        "pid": std::process::id(),
+        "started_at": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0),
+    })
+}
+
+fn hostname() -> String {
+    fs::read_to_string("/etc/hostname")
+        .map(|text| text.trim().to_string())
+        .ok()
+        .filter(|text| !text.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn total_memory_kb() -> u64 {
+    memory_field_kb("MemTotal").unwrap_or(0)
+}
+
+fn memory_usage() -> (u64, f64) {
+    let total_memory_kb = memory_field_kb("MemTotal").unwrap_or(0);
+    let available_memory_kb = memory_field_kb("MemAvailable").unwrap_or(0);
+    let used_memory_kb = total_memory_kb.saturating_sub(available_memory_kb);
+    let memory_used_ratio = if total_memory_kb > 0 {
+        used_memory_kb as f64 / total_memory_kb as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    (used_memory_kb, memory_used_ratio)
+}
+
+fn memory_field_kb(field_name: &str) -> Option<u64> {
+    let Ok(text) = fs::read_to_string("/proc/meminfo") else {
+        return None;
+    };
+
+    text.lines()
+        .find_map(|line| {
+            let value = line.strip_prefix(&format!("{field_name}:"))?.trim();
+            value
+                .split_whitespace()
+                .next()
+                .and_then(|num| num.parse::<u64>().ok())
+        })
 }

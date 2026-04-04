@@ -135,8 +135,8 @@
     </div>
 
     <div class="card">
-      <h2 class="title">Master 设备信息 / 玩家在线数</h2>
-      <pre id="masterDeviceInfo">{}</pre>
+      <h2 class="title">当前节点设备信息 / 玩家在线数</h2>
+      <pre id="currentNodeDeviceInfo">{}</pre>
       <br>
       <div class="stat-label">玩家在线数</div>
       <div class="value" id="playerCount">0</div>
@@ -159,10 +159,28 @@
       return `${(kb / 1024).toFixed(2)} MB`;
     }
 
+    function sortNodes(nodes, selfNodeId) {
+      return [...nodes].sort((left, right) => {
+        const leftRoleWeight = left.role === "master" ? 0 : 1;
+        const rightRoleWeight = right.role === "master" ? 0 : 1;
+        if (leftRoleWeight !== rightRoleWeight) {
+          return leftRoleWeight - rightRoleWeight;
+        }
+
+        const leftSelfWeight = left.node_id === selfNodeId ? 0 : 1;
+        const rightSelfWeight = right.node_id === selfNodeId ? 0 : 1;
+        if (leftSelfWeight !== rightSelfWeight) {
+          return leftSelfWeight - rightSelfWeight;
+        }
+
+        return String(left.node_id ?? "").localeCompare(String(right.node_id ?? ""));
+      });
+    }
+
     function renderDashboard(data) {
       const cfg = data.config ?? {};
       const selfNode = cfg.distributed ?? {};
-      const masterDevice = data.master_device ?? {};
+      const currentNodeDevice = data.current_node_device ?? {};
 
       document.getElementById("selfNodeId").textContent =
         selfNode.node_id ?? "-";
@@ -185,14 +203,20 @@
         data.player_count ?? 0;
       document.getElementById("configInfo").textContent =
         JSON.stringify(cfg, null, 2);
-      document.getElementById("masterDeviceInfo").textContent =
+      document.getElementById("currentNodeDeviceInfo").textContent =
         JSON.stringify({
-          ...masterDevice,
-          total_memory: formatMemory(masterDevice.total_memory_kb),
-          started_at: formatTime(masterDevice.started_at)
+          hostname: currentNodeDevice.hostname,
+          os: currentNodeDevice.os,
+          arch: currentNodeDevice.arch,
+          cpu_cores: currentNodeDevice.cpu_cores,
+          total_memory: formatMemory(currentNodeDevice.total_memory_kb),
+          used_memory: formatMemory(currentNodeDevice.used_memory_kb),
+          memory_used_ratio: `${Number(currentNodeDevice.memory_used_ratio || 0).toFixed(2)}%`,
+          pid: currentNodeDevice.pid,
+          started_at: formatTime(currentNodeDevice.started_at)
         }, null, 2);
 
-      const allRows = (data.distributed.all_nodes?.nodes ?? [])
+      const allRows = sortNodes(allNodes, selfNode.node_id ?? "")
         .map((node) => `
           <tr class="${node.node_id === selfNode.node_id ? "self-node" : ""}">
             <td>
