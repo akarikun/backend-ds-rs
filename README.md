@@ -22,6 +22,8 @@
 部署完成后可以在addon-test.html测试
 http://0.0.0.0:8082/addon-test.html
 
+![1.png](https://raw.githubusercontent.com/akarikun/backend-ds-rs/refs/heads/main/1.png)
+
 ### 分布式任务协议
 
 向 `/server` namespace 发送：
