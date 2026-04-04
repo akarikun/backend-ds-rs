@@ -1,5 +1,46 @@
 ### 一个简单的分布式后台服务
 
+- 推荐部署顺序：运行当前程序会在当前目录添加`config.json`配置，然后退出程序，如果是 PostgreSQL 空库，先调用一次 `cargo test test_init_postgresql_schema --lib -- --nocapture
+` 初始化表结构，更新`config.json`配置后，运行当前程序。
+- 当前架构边界：建议按单 master + 多 worker 使用，暂时不要直接扩成多 master，避免 addon 同步和调度一致性变复杂。
+- `task_idempotency` 现在不会自动清理，长期运行后表数据会持续增长，后面可以按保留天数加一个定期清理策略。
+- addon JS 同步规则：worker 连接 master 时会同步 master 的脚本；如果 master 上更新了 `addons/*.js`，需要 master 重启或 worker 重连后 worker 才会拿到新版本。
+- 正式部署前建议做一次完整联调：master、worker、PostgreSQL/MongoDB、Redis、玩家创建/查询、发奖、邮件、幂等重试、dashboard 页面展示都跑一遍。
+
+
+### 配置 具体可参考config.rs备注
+```
+{
+  "host": "0.0.0.0:8082",
+  "client_ns": "/ws",
+  "dashboard_ns": "/api/dashboard",
+  "aes_passphrase": "V0.0.1-A265",
+  "db": {
+    "kind": "mongodb",
+    "mongodb_uri": "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds",
+    "mongodb_db": "backend_ds",
+    "postgresql_url": "postgresql://postgres:postgres@127.0.0.1:5432/backend_ds"
+  },
+  "redis":{
+    "enabled": false,
+    "redis_url": "redis://127.0.0.1:6379/",
+    "key_prefix": "backend_ds:",
+    "default_ttl_secs": 300
+  },
+  "distributed": {
+    "server_ns": "/server",
+    "server_token": "V0.0.1-SERVER",
+    "node_id": "master-1",
+    "node_role": "master",
+    "node_addr": "192.168.1.1:8082",
+    "master_addr": "192.168.1.1:8082",
+    "max_load": 100,
+    "heartbeat_interval_secs": 5,
+    "node_timeout_secs": 15
+  }
+}
+```
+
 ### 分布式任务流程
 
 - Worker 启动后会主动连接 master 的 `distributed.server_ns`，注册自身 `node_id/node_role/node_addr/max_load`。
@@ -9,9 +50,9 @@
 - Master 侧会对远端任务做超时监控，超时后按 `max_retries` 自动重派；重试耗尽返回 `task_timeout`。
 
 ### test_init_postgresql_schema
-##### 玩家数据表 
+##### 玩家数据表
 
-注意：如果 PostgreSQL 是空库，启动服务前必须先跑一次 test_init_postgresql_schema()，否则业务 SQL 会因为表不存在而失败。
+注意：如果 PostgreSQL 是空库，启动服务前必须先跑一次 `test_init_postgresql_schema`，这个测试方法内部会调用 `init_postgresql_schema()` 初始化表结构，否则业务 SQL 会因为表不存在而失败。
 
 - `player_profiles`: 玩家基础档案，保存昵称、等级、经验、头像、创建/更新时间。
 - `player_wallets`: 玩家货币账户，保存金币、钻石、体力。
@@ -23,6 +64,7 @@
 http://0.0.0.0:8082/addon-test.html
 
 ![1.png](https://raw.githubusercontent.com/akarikun/backend-ds-rs/refs/heads/main/1.png)
+![2.png](https://raw.githubusercontent.com/akarikun/backend-ds-rs/refs/heads/main/2.png)
 
 ### 分布式任务协议
 
@@ -84,6 +126,23 @@ http://0.0.0.0:8082/addon-test.html
 - 旧 attempt 的迟到结果会被 master 丢弃，只释放 worker 负载，不会覆盖当前 attempt 的返回。
 - 常见错误码：`duplicate_task_id`、`task_timeout`、`task_retry_no_available_worker`、`task_retry_emit_failed`、`task_running_wait_timeout`、`task_idempotency_state_lost`、`finish_task_idempotency_failed`。
 
+
+### 任务实现优先级：JS 覆盖 Rust
+
+只需要在Master中部署 `addons/*.js`， Worker同步时会将JS代码同步并加载到内存中
+
+同一个任务类型会优先执行 `addons/*.js` 里的 JS handler；如果 JS 没有实现这个任务，才会回退到 Rust 内置 handler。
+
+也就是说，如果你后面在 Rust 里实现了 `create_player`，但某些场景想临时调整逻辑，只要在 addon JS 里写一个同名的 `query("create_player", ...)`，就能覆盖 Rust 版本；删除这个 JS handler 后，又会自动回退到 Rust 版本。
+
+Rust 任务注册格式在 `src/worker_task.rs` 的 `TASK_METHODS` 里，例如：
+
+```rust
+// map.insert("create_player", create_player_handler as TaskHandler);
+```
+
+Rust 版 `create_player_handler` 的 demo 也已经注释写在 `src/worker_task.rs` 末尾，可以直接按那个格式扩展自己的任务。
+
 ### Addon DB 用法
 
 ```js
@@ -116,53 +175,4 @@ Rust 侧会把 `cache.get/cache.set/cache.del` 注入 addon JS。当前 `addons/
 let player = await cache.get(`player:${userid}`);
 await cache.set(`player:${userid}`, player, 300);
 await cache.del(`player:${userid}`);
-```
-
-### 任务实现优先级：JS 覆盖 Rust
-
-只需要在Master中部署addons/*.js，Worker同步时会将JS代码同步并加载到内存中
-
-同一个任务类型会优先执行 `addons/*.js` 里的 JS handler；如果 JS 没有实现这个任务，才会回退到 Rust 内置 handler。
-
-也就是说，如果你后面在 Rust 里实现了 `create_player`，但某些场景想临时调整逻辑，只要在 addon JS 里写一个同名的 `query("create_player", ...)`，就能覆盖 Rust 版本；删除这个 JS handler 后，又会自动回退到 Rust 版本。
-
-Rust 任务注册格式在 `src/worker_task.rs` 的 `TASK_METHODS` 里，例如：
-
-```rust
-// map.insert("create_player", create_player_handler as TaskHandler);
-```
-
-Rust 版 `create_player_handler` 的 demo 也已经注释写在 `src/worker_task.rs` 末尾，可以直接按那个格式扩展自己的任务。
-
-### 配置 具体可参考config.rs备注
-```
-{
-  "host": "0.0.0.0:8082",
-  "client_ns": "/ws",
-  "dashboard_ns": "/api/dashboard",
-  "aes_passphrase": "V0.0.1-A265",
-  "db": {
-    "kind": "mongodb",
-    "mongodb_uri": "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds",
-    "mongodb_db": "backend_ds",
-    "postgresql_url": "postgresql://postgres:postgres@127.0.0.1:5432/backend_ds"
-  },
-  "redis":{
-    "enabled": false,
-    "redis_url": "redis://127.0.0.1:6379/",
-    "key_prefix": "backend_ds:",
-    "default_ttl_secs": 300
-  },
-  "distributed": {
-    "server_ns": "/server",
-    "server_token": "V0.0.1-SERVER",
-    "node_id": "master-1",
-    "node_role": "master",
-    "node_addr": "192.168.1.1:8082",
-    "master_addr": "192.168.1.1:8082",
-    "max_load": 100,
-    "heartbeat_interval_secs": 5,
-    "node_timeout_secs": 15
-  }
-}
 ```
