@@ -10,9 +10,14 @@ use serde_json::{Value, json};
 use socketioxide::SocketIo;
 use socketioxide::extract::{Data, SocketRef};
 use socketioxide::socket::DisconnectReason;
+use std::fs;
+use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, interval};
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
+
+static MASTER_DEVICE_INFO: LazyLock<Value> = LazyLock::new(master_device_info);
 
 lazy_static::lazy_static! {
     static ref CLIENT_MAP: DashMap<String, SocketRef> = DashMap::new();
@@ -113,12 +118,26 @@ async fn on_connect(_io: SocketIo, socket: SocketRef, Data(data): Data<Value>) {
 
 fn dashboard_state() -> Value {
     let distributed = config.distributed.clone();
+    let db = config.db.clone();
+    let redis = config.redis.clone();
     json!({
         "config": {
             "host": config.host,
             "client_ns": config.client_ns,
             "dashboard_ns": config.dashboard_ns,
             "aes_passphrase": "***",
+            "db": {
+                "kind": db.kind,
+                "mongodb_uri": mask_secret_url(db.mongodb_uri.as_str()),
+                "mongodb_db": db.mongodb_db,
+                "postgresql_url": mask_secret_url(db.postgresql_url.as_str()),
+            },
+            "redis": {
+                "enabled": redis.enabled,
+                "redis_url": mask_secret_url(redis.redis_url.as_str()),
+                "key_prefix": redis.key_prefix,
+                "default_ttl_secs": redis.default_ttl_secs,
+            },
             "distributed": {
                 "server_ns": distributed.server_ns,
                 "server_token": "***",
@@ -131,9 +150,64 @@ fn dashboard_state() -> Value {
                 "node_timeout_secs": distributed.node_timeout_secs,
             }
         },
+        "master_device": MASTER_DEVICE_INFO.clone(),
         "player_count": get_client_count(),
         "distributed": distributed::dashboard_snapshot(),
     })
+}
+
+fn master_device_info() -> Value {
+    json!({
+        "hostname": hostname(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "cpu_cores": std::thread::available_parallelism()
+            .map(|num| num.get())
+            .unwrap_or(1),
+        "total_memory_kb": total_memory_kb(),
+        "pid": std::process::id(),
+        "started_at": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0),
+    })
+}
+
+fn hostname() -> String {
+    fs::read_to_string("/etc/hostname")
+        .map(|text| text.trim().to_string())
+        .ok()
+        .filter(|text| !text.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn total_memory_kb() -> u64 {
+    let Ok(text) = fs::read_to_string("/proc/meminfo") else {
+        return 0;
+    };
+
+    text.lines()
+        .find_map(|line| {
+            let value = line.strip_prefix("MemTotal:")?.trim();
+            value
+                .split_whitespace()
+                .next()
+                .and_then(|num| num.parse::<u64>().ok())
+        })
+        .unwrap_or(0)
+}
+
+fn mask_secret_url(raw_url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(raw_url) else {
+        return raw_url.to_string();
+    };
+
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some("***"));
+    }
+
+    parsed.to_string()
 }
 
 async fn dashboard_connect(_io: SocketIo, socket: SocketRef, Data(_data): Data<Value>) {

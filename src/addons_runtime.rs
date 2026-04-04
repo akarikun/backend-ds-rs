@@ -1,4 +1,5 @@
 use crate::commons::db;
+use crate::commons::redis;
 use boa_engine::js_string;
 use boa_engine::native_function::NativeFunction;
 use boa_engine::object::builtins::JsPromise;
@@ -26,6 +27,11 @@ globalThis.query = (name, handler) => {
 };
 globalThis.db = {
   query: (sql, params) => __db_query(sql, params || []),
+};
+globalThis.cache = {
+  get: (key) => __cache_get(key),
+  set: (key, value, ttlSecs) => __cache_set(key, value, ttlSecs),
+  del: (key) => __cache_del(key),
 };
 globalThis.console = {
   log: (...args) => __console_log(...args),
@@ -156,6 +162,27 @@ fn register_db_functions(context: &mut Context) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     context
         .register_global_builtin_callable(
+            js_string!("__cache_get"),
+            1,
+            NativeFunction::from_fn_ptr(js_cache_get),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .register_global_builtin_callable(
+            js_string!("__cache_set"),
+            3,
+            NativeFunction::from_fn_ptr(js_cache_set),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .register_global_builtin_callable(
+            js_string!("__cache_del"),
+            1,
+            NativeFunction::from_fn_ptr(js_cache_del),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .register_global_builtin_callable(
             js_string!("__console_log"),
             0,
             NativeFunction::from_fn_ptr(js_console_log),
@@ -163,6 +190,9 @@ fn register_db_functions(context: &mut Context) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     context
         .register_global_property(js_string!("db"), JsValue::null(), Attribute::all())
+        .map_err(|err| err.to_string())?;
+    context
+        .register_global_property(js_string!("cache"), JsValue::null(), Attribute::all())
         .map_err(|err| err.to_string())
 }
 
@@ -188,6 +218,79 @@ fn js_db_query(
     };
 
     Ok(json_to_js_value(value, context))
+}
+
+fn js_cache_get(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let key = js_arg_to_string(args.first(), context);
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(redis::redis_get(key.as_str()))
+    });
+
+    match result {
+        Ok(Some(value)) => Ok(json_to_js_value(value, context)),
+        Ok(None) => Ok(JsValue::undefined()),
+        Err(err) => Ok(json_to_js_value(
+            json!({
+                "ok": false,
+                "error": err,
+            }),
+            context,
+        )),
+    }
+}
+
+fn js_cache_set(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let key = js_arg_to_string(args.first(), context);
+    let value = js_arg_to_json(args.get(1), context).unwrap_or(Value::Null);
+    let ttl_secs = js_arg_to_json(args.get(2), context).and_then(|value| value.as_u64());
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(redis::redis_set(
+            key.as_str(),
+            &value,
+            ttl_secs,
+        ))
+    });
+
+    match result {
+        Ok(()) => Ok(JsValue::new(true)),
+        Err(err) => Ok(json_to_js_value(
+            json!({
+                "ok": false,
+                "error": err,
+            }),
+            context,
+        )),
+    }
+}
+
+fn js_cache_del(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let key = js_arg_to_string(args.first(), context);
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(redis::redis_del(key.as_str()))
+    });
+
+    match result {
+        Ok(()) => Ok(JsValue::new(true)),
+        Err(err) => Ok(json_to_js_value(
+            json!({
+                "ok": false,
+                "error": err,
+            }),
+            context,
+        )),
+    }
 }
 
 

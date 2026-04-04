@@ -15,6 +15,8 @@ pub struct Config {
     pub aes_passphrase: String,
     // 数据库配置：所有 master/worker 节点都可以直连同一台 DB。
     pub db: DbConfig,
+    // Redis 配置：当前先用来做简单 key-value JSON 缓存。
+    pub redis: RedisConfig,
     // 分布式后台节点相关配置。
     pub distributed: DistributedConfig,
 }
@@ -24,7 +26,6 @@ pub struct Config {
 pub struct DbConfig {
     // 数据库类型：mongodb 或 postgresql。
     pub kind: String,
-    pub kind_desc: String,
     // MongoDB 连接串。
     pub mongodb_uri: String,
     // MongoDB 数据库名。
@@ -56,6 +57,19 @@ pub struct DistributedConfig {
     pub node_timeout_secs: u64,
 }
 
+#[derive(Clone, Deserialize, Serialize, Debug)]
+#[serde(default)]
+pub struct RedisConfig {
+    // 是否启用 Redis 缓存；先默认关闭，避免本地没启动 Redis 时影响服务启动。
+    pub enabled: bool,
+    // Redis 连接地址。
+    pub redis_url: String,
+    // 缓存 key 前缀，方便区分环境/业务。
+    pub key_prefix: String,
+    // 默认缓存 TTL 秒数。
+    pub default_ttl_secs: u64,
+}
+
 impl Default for DistributedConfig {
     fn default() -> Self {
         Self {
@@ -80,6 +94,7 @@ impl Default for Config {
             dashboard_ns: "/api/dashboard".to_string(),
             aes_passphrase: "V0.0.1-A265".to_string(),
             db: DbConfig::default(),
+            redis: RedisConfig::default(),
             distributed: DistributedConfig::default(),
         }
     }
@@ -89,11 +104,21 @@ impl Default for DbConfig {
     fn default() -> Self {
         Self {
             kind: "mongodb".to_string(),
-            kind_desc: "数据库类型，支持 mongodb 或 postgresql".to_string(),
             mongodb_uri: "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds".to_string(),
             mongodb_db: "backend_ds".to_string(),
             postgresql_url: "postgres://postgres:123456@localhost:5432/backend_ds"
                 .to_string(),
+        }
+    }
+}
+
+impl Default for RedisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            redis_url: "redis://127.0.0.1:6379/".to_string(),
+            key_prefix: "backend_ds:".to_string(),
+            default_ttl_secs: 300,
         }
     }
 }

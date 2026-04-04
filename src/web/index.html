@@ -99,6 +99,10 @@
       <h2 class="title">集群节点</h2>
       <div class="stats">
         <div>
+          <div class="stat-label">Master 数量</div>
+          <div class="value" id="masterCount">0</div>
+        </div>
+        <div>
           <div class="stat-label">Worker 数量</div>
           <div class="value" id="workerCount">0</div>
         </div>
@@ -123,16 +127,19 @@
     </div>
 
     <div class="card">
-      <h2 class="title">玩家在线数</h2>
-      <div class="value" id="playerCount">0</div>
-    </div>
-
-    <div class="card">
       <h2 class="title">当前节点 / 当前配置</h2>
       <div class="value" id="selfNodeId">-</div>
       <pre id="selfNodeInfo">{}</pre>
       <br>
       <pre id="configInfo">{}</pre>
+    </div>
+
+    <div class="card">
+      <h2 class="title">Master 设备信息 / 玩家在线数</h2>
+      <pre id="masterDeviceInfo">{}</pre>
+      <br>
+      <div class="stat-label">玩家在线数</div>
+      <div class="value" id="playerCount">0</div>
     </div>
   </div>
 
@@ -143,9 +150,19 @@
       return new Date(ts * 1000).toLocaleString();
     }
 
+    function formatMemory(totalKb) {
+      const kb = Number(totalKb || 0);
+      if (!Number.isFinite(kb) || kb <= 0) return "-";
+      if (kb >= 1024 * 1024) {
+        return `${(kb / 1024 / 1024).toFixed(2)} GB`;
+      }
+      return `${(kb / 1024).toFixed(2)} MB`;
+    }
+
     function renderDashboard(data) {
       const cfg = data.config ?? {};
       const selfNode = cfg.distributed ?? {};
+      const masterDevice = data.master_device ?? {};
 
       document.getElementById("selfNodeId").textContent =
         selfNode.node_id ?? "-";
@@ -156,6 +173,10 @@
           master_addr: selfNode.master_addr
         }, null, 2);
 
+      const allNodes = data.distributed?.all_nodes?.nodes ?? [];
+
+      document.getElementById("masterCount").textContent =
+        allNodes.filter((node) => node.role === "master").length;
       document.getElementById("workerCount").textContent =
         data.distributed.worker_count ?? 0;
       document.getElementById("allNodeCount").textContent =
@@ -164,6 +185,12 @@
         data.player_count ?? 0;
       document.getElementById("configInfo").textContent =
         JSON.stringify(cfg, null, 2);
+      document.getElementById("masterDeviceInfo").textContent =
+        JSON.stringify({
+          ...masterDevice,
+          total_memory: formatMemory(masterDevice.total_memory_kb),
+          started_at: formatTime(masterDevice.started_at)
+        }, null, 2);
 
       const allRows = (data.distributed.all_nodes?.nodes ?? [])
         .map((node) => `

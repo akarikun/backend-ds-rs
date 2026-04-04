@@ -20,7 +20,21 @@ function mailQueryOf(userid, mailId) {
   return 0;
 }
 
-async function loadPlayer(db, userid) {
+function playerCacheKey(userid) {
+  return `player:${userid}`;
+}
+
+async function loadPlayer(db, userid, reloadCache) {
+  if (!reloadCache) {
+    let cachedPlayer = await cache.get(playerCacheKey(userid));
+    if (cachedPlayer && !isDbError(cachedPlayer)) {
+      return {
+        ...cachedPlayer,
+        cache_hit: true,
+      };
+    }
+  }
+
   let profiles = await db.query(
     "select * from player_profiles where userid = ?",
     [userid]
@@ -30,6 +44,7 @@ async function loadPlayer(db, userid) {
   }
   let profile = profiles[0];
   if (!profile) {
+    await cache.del(playerCacheKey(userid));
     return null;
   }
 
@@ -55,7 +70,7 @@ async function loadPlayer(db, userid) {
     return mails;
   }
 
-  return {
+  let player = {
     profile,
     wallet: wallets[0] || {
       userid,
@@ -67,6 +82,8 @@ async function loadPlayer(db, userid) {
     items,
     mails,
   };
+  await cache.set(playerCacheKey(userid), player);
+  return player;
 }
 
 async function ensurePlayer(db, userid, type) {
@@ -168,7 +185,7 @@ async function changeCurrency(db, userid, currency, delta, type) {
     ok: true,
     type,
     wallet: updated[0] || { ...wallet, [currency]: nextValue },
-    player: await loadPlayer(db, userid),
+    player: await loadPlayer(db, userid, true),
   };
 }
 
@@ -247,7 +264,7 @@ async function changeItem(db, userid, itemId, delta, type) {
       item_id: itemId,
       item_count: nextCount,
     },
-    player: await loadPlayer(db, userid),
+    player: await loadPlayer(db, userid, true),
   };
 }
 
@@ -310,7 +327,7 @@ query("create_player", async (db, data) => {
     };
   }
 
-  let reloadPlayer = await loadPlayer(db, userid);
+  let reloadPlayer = await loadPlayer(db, userid, true);
 
   return {
     ok: true,
@@ -409,7 +426,7 @@ query("send_mail", async (db, data) => {
     ok: true,
     type: "send_mail",
     mail: mail[0] || null,
-    player: await loadPlayer(db, userid),
+    player: await loadPlayer(db, userid, true),
   };
 });
 
@@ -476,6 +493,6 @@ query("claim_mail", async (db, data) => {
     ok: true,
     type: "claim_mail",
     mail: updated[0] || { ...mail, status: "claimed" },
-    player: await loadPlayer(db, userid),
+    player: await loadPlayer(db, userid, true),
   };
 });

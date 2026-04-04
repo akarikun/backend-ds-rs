@@ -21,6 +21,10 @@ mod tests {
             eprintln!("skip db integration test: {err}");
             return;
         }
+        if let Err(err) = crate::commons::redis::init_redis().await {
+            eprintln!("skip redis integration test: {err}");
+            return;
+        }
 
         crate::addons_runtime::init_addons();
         let userid = test_userid();

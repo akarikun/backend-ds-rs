@@ -1,21 +1,13 @@
 use super::config::Config;
-use crate::commons::utils;
 use aes::Aes256;
 use aes::cipher::BlockDecryptMut;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockEncryptMut, KeyIvInit};
 use base64::{Engine as _, engine::general_purpose};
 use cbc::Decryptor;
-use chrono::{Duration, prelude::*};
-// use deadpool::managed::QueueMode;
-// use deadpool_postgres::{Config as pConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use md5::{Digest, Md5};
-// use rand::RngCore;
-use rand::{Rng, rng};
-use std::collections::HashMap;
+use rand::Rng;
 use std::sync::LazyLock;
-use tokio::sync::OnceCell;
-use uuid::Uuid;
 
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| Config::load().unwrap());
 

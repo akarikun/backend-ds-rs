@@ -100,15 +100,18 @@ query("create_player", async (db, data) => {
 });
 ```
 
+### Addon Redis 缓存用法
+
+Rust 侧会把 `cache.get/cache.set/cache.del` 注入 addon JS。当前 `addons/connector.js` 先对 `get_player` 做了一个简单的玩家快照缓存，写操作后会强制回源并刷新缓存。
+
+```js
+let player = await cache.get(`player:${userid}`);
+await cache.set(`player:${userid}`, player, 300);
+await cache.del(`player:${userid}`);
 ```
-# Master
-"node_id": "master-1",
-"node_role": "master",
 
-# Worker
-"node_id": "worker-1",
-"node_role": "worker",
-
+### 配置 具体可参考config.rs备注
+```
 {
   "host": "0.0.0.0:8082",
   "client_ns": "/ws",
@@ -116,18 +119,23 @@ query("create_player", async (db, data) => {
   "aes_passphrase": "V0.0.1-A265",
   "db": {
     "kind": "mongodb",
-    "kind_desc": "数据库类型，支持 mongodb 或 postgresql",
     "mongodb_uri": "mongodb://admin:123456@127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=backend_ds",
     "mongodb_db": "backend_ds",
     "postgresql_url": "postgresql://postgres:postgres@127.0.0.1:5432/backend_ds"
+  },
+  "redis":{
+    "enabled": false,
+    "redis_url": "redis://127.0.0.1:6379/",
+    "key_prefix": "backend_ds:",
+    "default_ttl_secs": 300
   },
   "distributed": {
     "server_ns": "/server",
     "server_token": "V0.0.1-SERVER",
     "node_id": "master-1",
     "node_role": "master",
-    "node_addr": "127.0.0.1:8082",
-    "master_addr": "127.0.0.1:8082",
+    "node_addr": "192.168.1.1:8082",
+    "master_addr": "192.168.1.1:8082",
     "max_load": 100,
     "heartbeat_interval_secs": 5,
     "node_timeout_secs": 15

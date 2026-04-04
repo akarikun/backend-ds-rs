@@ -387,17 +387,40 @@ pub fn dashboard_snapshot() -> Value {
 
     prune_expired_nodes();
 
-    let workers = SERVER_NODES
-        .iter()
-        .filter(|entry| entry.value().role == "worker")
-        .map(|entry| {
-            let node = entry.value();
+    let self_node_id = config.distributed.node_id.clone();
+    let self_node = json!({
+        "node_id": self_node_id,
+        "addr": config.distributed.node_addr,
+        "role": config.distributed.node_role,
+        "current_load": 0,
+        "max_load": config.distributed.max_load,
+        "last_heartbeat": now_ts(),
+    });
+
+    let mut all_nodes = node_snapshot();
+    if let Some(nodes) = all_nodes.get_mut("nodes").and_then(|value| value.as_array_mut()) {
+        if !nodes.iter().any(|node| {
+            node.get("node_id").and_then(|value| value.as_str()) == Some(&self_node_id)
+        }) {
+            nodes.push(self_node);
+        }
+        all_nodes["count"] = json!(nodes.len());
+    }
+
+    let workers = all_nodes
+        .get("nodes")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|node| node.get("role").and_then(|role| role.as_str()) == Some("worker"))
+        .map(|node| {
             json!({
-                "node_id": node.node_id,
-                "addr": node.addr,
-                "current_load": node.current_load,
-                "max_load": node.max_load,
-                "last_heartbeat": node.last_heartbeat,
+                "node_id": node.get("node_id").cloned().unwrap_or_else(|| json!("")),
+                "addr": node.get("addr").cloned().unwrap_or_else(|| json!("")),
+                "current_load": node.get("current_load").cloned().unwrap_or_else(|| json!(0)),
+                "max_load": node.get("max_load").cloned().unwrap_or_else(|| json!(0)),
+                "last_heartbeat": node.get("last_heartbeat").cloned().unwrap_or_else(|| json!(0)),
             })
         })
         .collect::<Vec<_>>();
@@ -405,7 +428,7 @@ pub fn dashboard_snapshot() -> Value {
     json!({
         "worker_count": workers.len(),
         "workers": workers,
-        "all_nodes": node_snapshot(),
+        "all_nodes": all_nodes,
     })
 }
 

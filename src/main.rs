@@ -16,6 +16,9 @@ async fn main() {
     if let Err(err) = init_db().await {
         panic!("init db failed: {err}");
     }
+    if let Err(err) = commons::redis::init_redis().await {
+        panic!("init redis failed: {err}");
+    }
     addons_runtime::init_addons();
     distributed::start_worker_client();
 
