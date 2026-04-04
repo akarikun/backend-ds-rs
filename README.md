@@ -70,7 +70,7 @@
 - `task_idempotency`: 分布式任务幂等表/集合，按 `task_id` 记录任务执行状态、attempt 和最终结果。
 
 部署完成后可以在addon-test.html测试
-http://0.0.0.0:8082/addon-test.html
+http://0.0.0.0:8082/web/addon-test.html
 
 ![1.png](https://raw.githubusercontent.com/akarikun/backend-ds-rs/refs/heads/main/1.png)
 ![2.png](https://raw.githubusercontent.com/akarikun/backend-ds-rs/refs/heads/main/2.png)
@@ -264,3 +264,69 @@ let player = await $cache.get(`player:${userid}`);
 await $cache.set(`player:${userid}`, player, 300);
 await $cache.del(`player:${userid}`);
 ```
+
+### Nginx线上部署
+线上部署时建议把 `config.json` 里的 `host` 改成只监听本机，例如：
+
+```json
+{
+  "host": "127.0.0.1:8082"
+}
+```
+
+Nginx 反代模板如下，按需替换 `server_name`、证书路径、后端端口：
+
+```nginx
+
+server {
+    listen 443 ssl http2;
+    server_name xxx.com;
+
+    ssl_certificate /etc/nginx/ssl/xxx.pem;
+    ssl_certificate_key /etc/nginx/ssl/xxx.key;
+
+    # CloudFlare有默认的大小，如果传输量过大会截断，这里可以设置一个值
+    client_max_body_size 10m; 
+
+    location / { return 444; } # 禁止访问主页
+
+    # /socket.io/这个可以自定义，但要跟后台代码配置相同
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:8082/socket.io/;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+    }
+
+    location ~ ^/(api|web)/ { # web相关的界面跟接口，只允许特定IP访问
+        # 白名单示例：按需替换成自己的出口 IP；如果要全部放开，删除 allow/deny 两行即可。
+        allow 1.2.3.4;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8082;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+部署后访问：
+
+- 前端页面：`https://xxx.com/web/index.html`
+- Addon 测试页：`https://xxx.com/web/addon-test.html`
+- Dashboard 接口：`https://xxx.com/api/dashboard`
+
+注意：
+
+- 客户端 `Socket.IO` 连接时 namespace 仍然用 `client_ns`（默认 `/ws`），master/worker 内部通讯 namespace 仍然用 `distributed.server_ns`（默认 `/server`），但它们的 HTTP/WebSocket 传输路径都是 `/socket.io`，所以 Nginx 只需要反代 `/socket.io/`，不需要单独配 `location /ws` 或 `location /server`。
+- `/socket.io/` 如果也要做白名单，可以在它自己的 `location` 里同样加 `allow/deny`，但不要和 `/api|web` 合并，避免漏掉 WebSocket Upgrade 和长连接参数。

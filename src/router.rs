@@ -5,6 +5,7 @@ use crate::worker_task;
 use bytes::Bytes;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use salvo::catcher::Catcher;
 use salvo::prelude::*;
 use serde_json::{Value, json};
 use socketioxide::SocketIo;
@@ -195,6 +196,10 @@ pub fn config_router() -> Router {
         .push(Router::with_path("/api/dashboard").get(dashboard_meta))
 }
 
+pub fn config_catcher() -> Catcher {
+    Catcher::default().hoop(rewrite_405_to_404)
+}
+
 #[handler]
 async fn hello() -> &'static str {
     ""
@@ -206,4 +211,82 @@ async fn dashboard_meta(res: &mut Response) {
         "dashboard_ns": config.dashboard_ns,
         "socket_path": "/socket.io",
     })));
+}
+
+#[handler]
+async fn rewrite_405_to_404(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    if res.status_code == Some(StatusCode::METHOD_NOT_ALLOWED) {
+        res.status_code(StatusCode::NOT_FOUND);
+    }
+
+    if res.status_code == Some(StatusCode::NOT_FOUND) {
+        render_not_found(req, res);
+        ctrl.skip_rest();
+        return;
+    }
+
+    ctrl.call_next(req, depot, res).await;
+}
+
+fn render_not_found(req: &Request, res: &mut Response) {
+    let accept = req
+        .headers()
+        .get("accept")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let path = req.uri().path();
+
+    if path.starts_with("/api/") || accept.contains("application/json") {
+        res.render(Json(json!({
+            "code": 404,
+            "message": "resource not found",
+            "path": path,
+        })));
+        return;
+    }
+
+    res.render(Text::Html(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>404 Not Found</title>
+    <style>
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background: #f6f7fb;
+            color: #1f2937;
+            font-family: sans-serif;
+        }
+        main {
+            padding: 32px;
+            text-align: center;
+        }
+        h1 {
+            margin: 0 0 12px;
+            font-size: 64px;
+        }
+        p {
+            margin: 0;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>404</h1>
+        <p>页面不存在</p>
+    </main>
+</body>
+</html>"#,
+    ));
 }

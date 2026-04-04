@@ -24,12 +24,14 @@ async fn main() {
 
     let router = Router::new()
         .push(router::config_router())
-        .push(Router::with_path("{**path}").get(static_embed::<Assets>().fallback("index.html")));
+        .push(
+            Router::with_path("/web/{**path}").get(static_embed::<Assets>().fallback("index.html")),
+        );
     let host = config.host.clone();
     dbg!(&config);
     println!("http://{}", host);
 
-    let service = Service::new(router);
+    let service = Service::new(router).catcher(router::config_catcher());
     let acceptor = TcpListener::new(host).bind().await;
     Server::new(acceptor).serve(service).await;
 }
