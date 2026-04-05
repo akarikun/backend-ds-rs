@@ -11,6 +11,8 @@ pub struct Config {
     pub client_ns: String,
     // 后台管理面板连接的 socket.io namespace。
     pub dashboard_ns: String,
+    // Socket.IO 的 HTTP 传输路径，前后端和 nginx 需要保持一致。
+    pub socket_path: String,
     // 玩家身份校验用的 AES 密钥短语，需和客户端加密逻辑保持一致。
     pub aes_passphrase: String,
     // 数据库配置：所有 master/worker 节点都可以直连同一台 DB。
@@ -92,6 +94,7 @@ impl Default for Config {
             host: "127.0.0.1:8082".to_string(),
             client_ns: "/ws".to_string(),
             dashboard_ns: "/api/dashboard".to_string(),
+            socket_path: "/socket.io".to_string(),
             aes_passphrase: "V0.0.1-A265".to_string(),
             db: DbConfig::default(),
             redis: RedisConfig::default(),

@@ -88,6 +88,10 @@
     let lastMailId = "";
     let lastRequest = null;
     let pendingAfterCreate = null;
+    const socketMeta = {
+      client_ns: "/ws",
+      socket_path: "/socket.io"
+    };
     const aesPassphrase = "V0.0.1-A265";
 
     function setStatus(text) {
@@ -118,6 +122,19 @@
       return payload;
     }
 
+    async function loadSocketMeta() {
+      try {
+        const res = await fetch("/api/dashboard", { cache: "no-store" });
+        if (!res.ok) {
+          return;
+        }
+        const meta = await res.json();
+        socketMeta.client_ns = meta.client_ns || socketMeta.client_ns;
+        socketMeta.socket_path = meta.socket_path || socketMeta.socket_path;
+      } catch (_err) {
+      }
+    }
+
     function connectWs() {
       const userid = document.getElementById("userid").value.trim();
       const validuser = CryptoJS.AES.encrypt(userid, aesPassphrase).toString();
@@ -126,8 +143,8 @@
         socket.disconnect();
       }
 
-      socket = io("/ws", {
-        path: "/socket.io",
+      socket = io(socketMeta.client_ns, {
+        path: socketMeta.socket_path,
         auth: { userid, validuser }
       });
 
@@ -247,6 +264,8 @@
         mail_id: mailId
       });
     }
+
+    loadSocketMeta();
   </script>
 </body>
 </html>

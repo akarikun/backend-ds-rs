@@ -1,6 +1,6 @@
-### 一个简单的分布式后台服务
+### 分布式后台服务
 
-##### 使用`Salvo` + `Socket.IO`
+基于 Rust + Salvo + Socket.IO 实现分布式游戏后端，支持 master/worker 任务调度、玩家数据管理、邮件/道具/货币业务、任务幂等重试、Addon JS 热扩展、Redis 缓存和 Dashboard 监控，并支持 Nginx 线上部署。
 
 - 推荐部署顺序：运行当前程序会在当前目录添加 `config.json` 配置，然后退出程序；如果是 PostgreSQL 空库，先调用一次 `cargo test test_init_postgresql_schema --lib -- --nocapture` 初始化表结构（非必需操作，主要用于测试），更新 `config.json` 配置后，再运行当前程序。
 - 当前架构边界：建议按单 master + 多 worker 使用，暂时不要直接扩成多 master，避免 addon 同步和调度一致性变复杂。
@@ -15,6 +15,7 @@
   "host": "0.0.0.0:8082",
   "client_ns": "/ws",
   "dashboard_ns": "/api/dashboard",
+  "socket_path": "/socket.io",
   "aes_passphrase": "V0.0.1-A265",
   "db": {
     "kind": "postgresql",
@@ -279,18 +280,18 @@ Nginx 反代模板如下，按需替换 `server_name`、证书路径、后端端
 ```nginx
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name xxx.com;
 
-    ssl_certificate /etc/nginx/ssl/xxx.pem;
-    ssl_certificate_key /etc/nginx/ssl/xxx.key;
+    ssl_certificate xxx.pem;
+    ssl_certificate_key xxx.key;
 
-    # CloudFlare有默认的大小，如果传输量过大会截断，这里可以设置一个值
+    # Cloudflare有默认的大小，如果传输量过大会截断，这里可以设置一个值
     client_max_body_size 10m; 
 
     location / { return 444; } # 禁止访问主页
 
-    # /socket.io/这个可以自定义，但要跟后台代码配置相同
+    # 可自定义（socket_path）
     location /socket.io/ {
         proxy_pass http://127.0.0.1:8082/socket.io/;
         proxy_http_version 1.1;

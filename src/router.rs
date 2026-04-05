@@ -192,7 +192,7 @@ pub fn config_router() -> Router {
     io.ns(config.dashboard_ns.as_str(), dashboard_connect);
     let layer = layer.compat();
     Router::new()
-        .push(Router::with_path("/socket.io").hoop(layer).goal(hello))
+        .push(Router::with_path(config.socket_path.as_str()).hoop(layer).goal(hello))
         .push(Router::with_path("/api/dashboard").get(dashboard_meta))
 }
 
@@ -209,10 +209,12 @@ async fn hello() -> &'static str {
 async fn dashboard_meta(res: &mut Response) {
     res.render(Json(json!({
         "dashboard_ns": config.dashboard_ns,
-        "socket_path": "/socket.io",
+        "socket_path": config.socket_path,
+        "client_ns": config.client_ns,
     })));
 }
 
+// 将 405 Method Not Allowed 转换为 404 Not Found，并渲染统一的 404 页面。
 #[handler]
 async fn rewrite_405_to_404(
     req: &mut Request,
@@ -233,6 +235,7 @@ async fn rewrite_405_to_404(
     ctrl.call_next(req, depot, res).await;
 }
 
+// 根据请求的 Accept 头和 URL 路径，返回 JSON 格式的 404 错误信息，或者渲染一个简单的 HTML 404 页面。
 fn render_not_found(req: &Request, res: &mut Response) {
     let accept = req
         .headers()
